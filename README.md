@@ -97,6 +97,18 @@ Use **File > Import > Metal Gear Solid 4 Model (.mdn)** or **Metal Gear Solid 4
 Motion Archive (.mtar)**. Loose MDNs still resolve remastered textures through
 the configured game installation.
 
+## Technical reference
+
+Detailed format and Blender conversion notes are available in the
+[technical asset reference](./docs/README.md):
+
+- [Models and rigs (MDN)](./docs/models.md)
+- [Materials and textures](./docs/materials-and-textures.md)
+- [Animations (MTAR/MTCM)](./docs/animations.md)
+- [Stage areas (GCX/GEOM/data.cnf)](./docs/stage-areas.md)
+- [Missions](./docs/missions.md)
+- [Archive containers (VPAK/DAR/QAR)](./docs/archive-containers.md)
+
 ## Format coverage and limits
 
 - Stage import covers direct and `foreach` GCX model references, direct
