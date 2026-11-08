@@ -1,0 +1,41 @@
+MGS4-MDN
+--------
+Copyright (c) 2025 trigger
+
+The MDN model layout and Blender material behavior were studied from
+cipherxof/MGS4-MDN, which is distributed under the MIT License.
+
+GUNS-OF-THE-PATRIOTS-LOCALIZATION-TOOL
+--------------------------------------
+Copyright (c) 2026 Dmytro Bidlov (Little Bit Team)
+
+The PC VPAK, raw-LZ4, PC_TXN_UP, and texture descriptor layouts were studied
+from LittleBitUA/GUNS-OF-THE-PATRIOTS-LOCALIZATION-TOOL, which is distributed
+under the MIT License.
+
+MIT License
+-----------
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Additional format references
+----------------------------
+Jayveer/Solideye and Jayveer/MGS-MDN-Noesis were used as behavioral and format
+references. cipherxof/Haven was used as a behavioral reference for GCX model
+placement and GEOM effect structures. Their source is not redistributed by
+this project.
