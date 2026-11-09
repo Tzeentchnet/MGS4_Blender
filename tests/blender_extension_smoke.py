@@ -64,6 +64,19 @@ with tempfile.TemporaryDirectory() as temporary:
 
     settings.asset_kind = "MODEL"
     assert len(settings.results) > 6_000
+    alias_item = next(
+        item
+        for item in settings.results
+        if item.virtual_path
+        == "common/stage/stage01/s01a00l/cache/00e46846.mdn"
+    )
+    assert settings.catalog_names_version
+    assert alias_item.resolved_name == "mem_def_b"
+    assert alias_item.name.startswith("mem_def_b  (00e46846.mdn)")
+    settings.search_text = "mem_def_b"
+    assert "mem_def_b" in settings.results[
+        settings.result_index
+    ].searchable_names.lower()
     settings.search_text = "00e46846.mdn"
     assert settings.search_text in settings.results[
         settings.result_index
@@ -83,6 +96,41 @@ with tempfile.TemporaryDirectory() as temporary:
     assert model_collection["mgs4_use_vertex_color"]
     assert not model_collection["mgs4_use_vertex_alpha"]
     assert model_collection["mgs4_highlight_missing_textures"]
+    character_materials = {
+        material
+        for obj in model_collection.all_objects
+        if obj.type == "MESH"
+        for material in obj.data.materials
+        if material is not None
+    }
+    assert character_materials
+    assert all(
+        not material["mgs4_vertex_color_available"]
+        and not material["mgs4_vertex_color_enabled"]
+        and not material["mgs4_vertex_alpha_enabled"]
+        for material in character_materials
+    )
+    assert any(
+        material["mgs4_vertex_alpha_available"]
+        for material in character_materials
+    )
+    for material in character_materials:
+        diffuse_nodes = [
+            node
+            for node in material.node_tree.nodes
+            if node.get("mgs4_role") == "diffuse"
+        ]
+        if not diffuse_nodes:
+            continue
+        principled = next(
+            node
+            for node in material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        )
+        assert (
+            principled.inputs["Base Color"].links[0].from_node
+            in diffuse_nodes
+        )
     armature = bpy.context.view_layer.objects.active
     assert armature is not None and armature.type == "ARMATURE"
     assert not armature.show_in_front

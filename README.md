@@ -59,7 +59,7 @@ were added for the images.
 
 ## Install
 
-1. Build or use `dist/mgs4_remastered_importer-1.2.0.zip`.
+1. Build or use `dist/mgs4_remastered_importer-1.2.1.zip`.
 2. In Blender 5.2, open **Edit > Preferences > Extensions**.
 3. Use the menu in the upper-right and choose **Install from Disk**.
 4. Select the ZIP and enable **MGS4 Remastered Importer**.
@@ -86,7 +86,8 @@ installation is read-only.
    reloads name dictionaries when needed.
 4. Select a result and click **Import Selected MGS4 Asset**.
 
-The browser uses the incomplete Solideye name dictionary as a starting point.
+The bundled Solideye alias dictionary is loaded and validated automatically
+when the extension is enabled, then applied to the initial asset catalog.
 Resolved entries show the friendly identifier together with the original
 hashed filename. A hash with multiple dictionary candidates displays every
 candidate separated by `|` instead of silently choosing one.
@@ -115,9 +116,10 @@ Model, Stage Area, and Mission imports expose three presentation controls:
   layer texture to Base Color. It is a preview, not a reconstruction of the
   game's unknown layer-mask and blend semantics.
 - **Vertex Color RGB** multiplies Base Color by the mesh's `Color` attribute
-  when every mesh using that material has compatible vertex colors. It is
-  enabled by default. **Vertex Color Alpha** is an independent opacity option
-  and is disabled by default.
+  when every mesh using that material has compatible, meaningful RGB data.
+  All-zero legacy RGB channels are ignored so they cannot black out resolved
+  diffuse textures. It is enabled by default. **Vertex Color Alpha** is an
+  independent opacity option and is disabled by default.
 
 The same options are available for loose MDN imports. The add-on preference
 **Highlight Missing Textures** creates magenta checker Images and keeps the

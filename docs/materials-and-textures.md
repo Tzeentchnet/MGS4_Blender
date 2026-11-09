@@ -172,11 +172,14 @@ declared slots could not be resolved.
 When **Vertex Color RGB** is enabled, the `Color` corner attribute multiplies
 the selected diffuse or layer-preview source before Base Color. The importer
 only enables this connection when every mesh using that material has a valid
-color layer, avoiding unpredictable fallback values on mixed-use materials.
+color layer with meaningful RGB values. Legacy character meshes that store
+uniform zero in RGB but use alpha for separate data keep their diffuse texture
+connected directly instead of being multiplied to black.
 
 **Vertex Color Alpha** is independent and disabled by default. When enabled,
 it drives Alpha, multiplying an existing opacity texture when present, and
-enables blended rendering. Disabling alpha does not disable RGB tinting.
+enables blended rendering. RGB and alpha availability are evaluated
+independently, so disabling or rejecting RGB does not discard valid alpha.
 
 ## Texture lookup
 
@@ -249,7 +252,8 @@ Missing checker Images use
 | Material | `mgs4_name_hash` | Material name hash |
 | Material | `mgs4_texture_count` | Declared active texture count |
 | Material | `mgs4_layer_mode` | Conservative or first-layer presentation |
-| Material | `mgs4_vertex_color_available` | All users have a valid `Color` layer |
+| Material | `mgs4_vertex_color_available` | All users have meaningful vertex RGB |
+| Material | `mgs4_vertex_alpha_available` | All users have meaningful vertex alpha |
 | Material | `mgs4_vertex_color_enabled` | Vertex RGB is connected |
 | Material | `mgs4_vertex_alpha_enabled` | Vertex alpha is connected |
 | Material | `mgs4_missing_texture_count` | Number of unresolved texture slots |

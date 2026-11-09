@@ -63,6 +63,7 @@ BUNDLED_ASSET_NAMES = (
     / "resources"
     / "solideye_dictionary.txt"
 )
+BUNDLED_ASSET_NAMES_VERSION = "solideye-1.2-79b0aad6"
 USER_ASSET_NAMES = (
     Path(
         bpy.utils.user_resource(
@@ -176,6 +177,7 @@ class MGS4SceneSettings(PropertyGroup):
     result_index: IntProperty(default=0)
     catalog_root: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_kind: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    catalog_names_version: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_error: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     scale: FloatProperty(
         name="Scale",
@@ -420,12 +422,14 @@ def _refresh_asset_results(
         not force
         and settings.catalog_root == preferences.game_root
         and settings.catalog_kind == settings.asset_kind
+        and settings.catalog_names_version == BUNDLED_ASSET_NAMES_VERSION
     ):
         return len(settings.results), settings.catalog_error
 
     settings.results.clear()
     settings.catalog_root = preferences.game_root
     settings.catalog_kind = settings.asset_kind
+    settings.catalog_names_version = ""
     settings.catalog_error = ""
     try:
         names = _asset_names(force=force)
@@ -441,6 +445,7 @@ def _refresh_asset_results(
     for asset in results:
         item = settings.results.add()
         _set_asset_result(item, asset, names)
+    settings.catalog_names_version = BUNDLED_ASSET_NAMES_VERSION
     _select_first_matching_result(settings)
     return len(results), ""
 
@@ -1423,6 +1428,8 @@ class MGS4_PT_importer(Panel):
         if (
             settings.catalog_root != preferences.game_root
             or settings.catalog_kind != settings.asset_kind
+            or settings.catalog_names_version
+            != BUNDLED_ASSET_NAMES_VERSION
         ):
             _schedule_asset_refresh(context.scene)
 
@@ -1519,6 +1526,7 @@ CLASSES = (
 
 
 def register():
+    _asset_names(force=True)
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.mgs4_importer = PointerProperty(type=MGS4SceneSettings)

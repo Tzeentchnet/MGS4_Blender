@@ -55,6 +55,12 @@ class _MaterialTextureOutputs:
     missing_count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _MaterialVertexColorSupport:
+    rgb: bool
+    alpha: bool
+
+
 def _game_vector(
     value: tuple[float, float, float] | tuple[float, float, float, float],
     scale: float = 1.0,
@@ -464,17 +470,51 @@ def _new_texture_nodes(
     return outputs
 
 
-def _material_vertex_color_support(model: MdnModel) -> tuple[bool, ...]:
-    usage: list[list[bool]] = [[] for _material in model.materials]
+def _material_vertex_color_support(
+    model: MdnModel,
+) -> tuple[_MaterialVertexColorSupport, ...]:
+    usage: list[list[_MaterialVertexColorSupport]] = [
+        [] for _material in model.materials
+    ]
     for geometry in model.meshes:
-        has_vertex_color = (
+        material_vertices: dict[int, set[int]] = {}
+        for triangle, material_index in zip(
+            geometry.triangles,
+            geometry.triangle_materials,
+        ):
+            if 0 <= material_index < len(usage):
+                material_vertices.setdefault(material_index, set()).update(
+                    triangle
+                )
+
+        has_vertex_colors = (
             bool(geometry.colors)
             and len(geometry.colors) == len(geometry.vertices)
         )
-        for material_index in set(geometry.triangle_materials):
-            if 0 <= material_index < len(usage):
-                usage[material_index].append(has_vertex_color)
-    return tuple(bool(values) and all(values) for values in usage)
+        for material_index, vertex_indices in material_vertices.items():
+            if not has_vertex_colors:
+                support = _MaterialVertexColorSupport(False, False)
+            else:
+                colors = (
+                    geometry.colors[vertex_index]
+                    for vertex_index in vertex_indices
+                )
+                color_values = tuple(colors)
+                support = _MaterialVertexColorSupport(
+                    rgb=any(
+                        any(abs(component) > 1e-6 for component in color[:3])
+                        for color in color_values
+                    ),
+                    alpha=any(abs(color[3]) > 1e-6 for color in color_values),
+                )
+            usage[material_index].append(support)
+    return tuple(
+        _MaterialVertexColorSupport(
+            rgb=bool(values) and all(value.rgb for value in values),
+            alpha=bool(values) and all(value.alpha for value in values),
+        )
+        for values in usage
+    )
 
 
 def _connect_material_presentation(
@@ -483,12 +523,12 @@ def _connect_material_presentation(
     diffuse: tuple[float, float, float, float],
     texture_outputs: _MaterialTextureOutputs,
     options: MaterialImportOptions,
-    vertex_color_available: bool,
+    vertex_support: _MaterialVertexColorSupport,
 ) -> None:
     nodes = material.node_tree.nodes
     links = material.node_tree.links
-    use_vertex_color = options.use_vertex_color and vertex_color_available
-    use_vertex_alpha = options.use_vertex_alpha and vertex_color_available
+    use_vertex_color = options.use_vertex_color and vertex_support.rgb
+    use_vertex_alpha = options.use_vertex_alpha and vertex_support.alpha
     vertex_node = None
     presentation_frame = None
 
@@ -545,7 +585,8 @@ def _connect_material_presentation(
         _set_transparent(material)
 
     material["mgs4_layer_mode"] = options.layer_mode
-    material["mgs4_vertex_color_available"] = vertex_color_available
+    material["mgs4_vertex_color_available"] = vertex_support.rgb
+    material["mgs4_vertex_alpha_available"] = vertex_support.alpha
     material["mgs4_vertex_color_enabled"] = use_vertex_color
     material["mgs4_vertex_alpha_enabled"] = use_vertex_alpha
     material["mgs4_missing_texture_count"] = texture_outputs.missing_count

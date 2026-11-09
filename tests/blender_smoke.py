@@ -198,6 +198,54 @@ with tempfile.TemporaryDirectory() as temporary:
     assert color_image["mgs4_interpretation"] == "COLOR"
     assert data_image["mgs4_interpretation"] == "DATA"
 
+    character_model = parse_mdn(
+        archive.fetch("common/stage/stage01/s01a00l/cache/00e46845.mdn")
+    )
+    character_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    character = import_mdn_model(
+        bpy.context,
+        character_model,
+        name="MGS4_CHARACTER_MATERIALS",
+        resolver=resolver,
+    )
+    assert not character.warnings
+    character_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in character_existing
+    )
+    assert character_materials
+    assert all(
+        not material["mgs4_vertex_color_available"]
+        and not material["mgs4_vertex_color_enabled"]
+        and material["mgs4_vertex_alpha_available"]
+        and not material["mgs4_vertex_alpha_enabled"]
+        for material in character_materials
+    )
+    character_diffuse_materials = [
+        material
+        for material in character_materials
+        if any(
+            node.get("mgs4_role") == "diffuse"
+            for node in material.node_tree.nodes
+        )
+    ]
+    assert character_diffuse_materials
+    for character_material in character_diffuse_materials:
+        character_principled = next(
+            node
+            for node in character_material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        )
+        assert (
+            character_principled.inputs["Base Color"]
+            .links[0]
+            .from_node.get("mgs4_role")
+            == "diffuse"
+        )
+
     layer_model = parse_mdn(
         archive.fetch("common/stage/slot/00000001/cache/0006860b.mdn")
     )
