@@ -21,21 +21,27 @@ not run the game executable, Solideye, or any other bundled executable.
   accelerated geometry, UV, color, tangent, and material assignment.
 - Builds Principled BSDF materials with diffuse, alpha, packed-normal, and
   conservative dielectric specular/shininess conversion. Opaque shaders do
-  not route unused diffuse alpha into viewport dithering, and shader-specific
-  layer/environment slots remain available as labeled nodes. Opacity/decal
-  shaders use blended transparency with overlap sorting disabled.
+  not route unused diffuse alpha into viewport dithering. Texture roles are
+  grouped into labeled node frames, color and data interpretations use
+  separate Blender Images, and optional checker images expose unresolved
+  texture references. Opacity/decal shaders use blended transparency with
+  overlap sorting disabled.
+- Provides conservative or first-layer material presentation, vertex-color
+  RGB multiplication, and separately opt-in vertex alpha.
 - Imports `MTAR`/`MTCM` skeletal clips as Blender 5.2 layered Actions at 60 FPS.
 - Reads stage GCX model-set and placement commands plus GEOM effect transforms.
 - Resolves cross-stage model dependencies declared by each stage's `data.cnf`
   manifest instead of limiting map assembly to MDNs stored in the local cache.
 - Provides a searchable archive browser for models, motion archives, complete
   stage areas, and multi-area mission groups.
+- Resolves known asset hashes through Solideye's starter dictionary and supports
+  searchable per-user names with JSON import and export.
 - Includes read-only pure-Python DAR and QAR parsers based on the layouts
   documented by Solideye.
 
 ## Install
 
-1. Build or use `dist/mgs4_remastered_importer-1.0.0.zip`.
+1. Build or use `dist/mgs4_remastered_importer-1.2.0.zip`.
 2. In Blender 5.2, open **Edit > Preferences > Extensions**.
 3. Use the menu in the upper-right and choose **Install from Disk**.
 4. Select the ZIP and enable **MGS4 Remastered Importer**.
@@ -57,9 +63,59 @@ installation is read-only.
 1. Open the **MGS4** tab in the 3D View sidebar.
 2. Choose **Models**, **Animations**, **Stage Areas**, or **Missions**.
 3. The selected asset type is indexed and listed automatically. Enter a stage
-   code, virtual path fragment, or hexadecimal asset hash to refine the list.
-   The refresh button re-indexes the installed archives when needed.
+   code, friendly name, virtual path fragment, or hexadecimal asset hash to
+   refine the list. The refresh button re-indexes the installed archives and
+   reloads name dictionaries when needed.
 4. Select a result and click **Import Selected MGS4 Asset**.
+
+The browser uses the incomplete Solideye name dictionary as a starting point.
+Resolved entries show the friendly identifier together with the original
+hashed filename. A hash with multiple dictionary candidates displays every
+candidate separated by `|` instead of silently choosing one.
+
+To name an unresolved asset or override a bundled name:
+
+1. Select the model or animation in the asset list.
+2. Click **Set Name**, enter a friendly name, and confirm.
+3. Use **Remove** to restore the bundled name or hashed filename.
+
+Custom names take priority, apply to every occurrence of the same hash, and
+are stored as `asset_names.json` under Blender's user configuration folder.
+They do not modify the game installation. **Import Names** merges another
+exported JSON dictionary; enable **Overwrite Existing Names** in the file
+browser when imported entries should replace current custom names. **Export
+Names** writes only the user's custom entries, making additions easy to share.
+
+### Material presentation
+
+Model, Stage Area, and Mission imports expose three presentation controls:
+
+- **Layer Presentation > Conservative** keeps the diffuse texture connected
+  to Base Color and leaves layer textures visible for inspection. This is the
+  default.
+- **Layer Presentation > First Layer Preview** connects the first inferred
+  layer texture to Base Color. It is a preview, not a reconstruction of the
+  game's unknown layer-mask and blend semantics.
+- **Vertex Color RGB** multiplies Base Color by the mesh's `Color` attribute
+  when every mesh using that material has compatible vertex colors. It is
+  enabled by default. **Vertex Color Alpha** is an independent opacity option
+  and is disabled by default.
+
+The same options are available for loose MDN imports. The add-on preference
+**Highlight Missing Textures** creates magenta checker Images and keeps the
+expected texture nodes visible when a referenced texture cannot be resolved.
+Disable it to retain warning-and-skip behavior. Color roles and data roles use
+separate Blender Image datablocks even when they reference the same game
+texture hash, preventing one material from changing another material's color
+space.
+
+Installed-game Model imports enable **Import Animations** by default. For a
+skinned MDN, the importer searches MTARs in the same virtual cache directory
+and requires every motion bone to exist in the model skeleton. It imports one
+best match, preferring an exact skeleton, then the greatest bone coverage, and
+then the largest clip library. **Action Limit** controls how many Actions are
+created from that archive. Disable **Import Animations** to import only the
+model.
 
 For animation results, select the matching imported armature first. MTAR names
 and model names are hashes; matching archives normally live in the same stage
@@ -67,6 +123,10 @@ cache. Human-readable clip names are not stored in MTAR, so imported Actions
 use `ARCHIVE_CLIPINDEX_CLIPHASH`, retain the source fields as custom
 properties, and define their own playback frame ranges. The importer skips
 tracks whose hashed bone is not present.
+
+Automatic animation matching applies only to direct installed-game Model
+imports. Stage Areas, Missions, and loose MDN files do not import animations
+automatically.
 
 For stage areas, **Use GCX/GEOM Layout** imports the static model set and placed
 models referenced by the stage scripts. The importer also resolves `data.cnf`
@@ -172,4 +232,6 @@ Format research and behavior were cross-checked against:
 - [cipherxof/Haven](https://github.com/cipherxof/Haven)
 - [LittleBitUA/GUNS-OF-THE-PATRIOTS-LOCALIZATION-TOOL](https://github.com/LittleBitUA/GUNS-OF-THE-PATRIOTS-LOCALIZATION-TOOL)
 
-No game assets are included.
+No binary game assets are included. The extension bundles Solideye's
+identifier-only starter dictionary with attribution in
+`THIRD_PARTY_NOTICES`.

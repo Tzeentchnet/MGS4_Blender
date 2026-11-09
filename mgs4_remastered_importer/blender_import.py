@@ -13,7 +13,24 @@ from .errors import MGS4Error
 from .formats.common import hash_name
 from .formats.mdn import MdnMaterial, MdnModel
 from .formats.mtar import MotionArchive, QuaternionKey
-from .formats.texture import TextureResolver
+from .formats.texture import TextureResolver, TextureSource
+
+
+LAYER_MODE_CONSERVATIVE = "CONSERVATIVE"
+LAYER_MODE_PREVIEW = "LAYER_PREVIEW"
+LAYER_MODES = frozenset({LAYER_MODE_CONSERVATIVE, LAYER_MODE_PREVIEW})
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialImportOptions:
+    layer_mode: str = LAYER_MODE_CONSERVATIVE
+    highlight_missing_textures: bool = True
+    use_vertex_color: bool = True
+    use_vertex_alpha: bool = False
+
+    def __post_init__(self) -> None:
+        if self.layer_mode not in LAYER_MODES:
+            raise ValueError(f"Unknown MGS4 layer mode: {self.layer_mode}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +46,13 @@ class MotionImportResult:
     actions: tuple[bpy.types.Action, ...]
     skipped_clips: int
     missing_bones: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _MaterialTextureOutputs:
+    base_color: bpy.types.NodeSocket | None = None
+    opacity: bpy.types.NodeSocket | None = None
+    missing_count: int = 0
 
 
 def _game_vector(
@@ -200,6 +224,104 @@ def _texture_roles(material: MdnMaterial) -> tuple[str, ...]:
     return tuple(roles[: material.texture_count])
 
 
+_COLOR_TEXTURE_ROLES = frozenset({"diffuse", "layer", "environment"})
+
+
+def _texture_interpretation(role: str) -> str:
+    return "COLOR" if role in _COLOR_TEXTURE_ROLES else "DATA"
+
+
+def _configure_image_color_space(image: bpy.types.Image, role: str) -> None:
+    image.colorspace_settings.name = (
+        "sRGB" if role in _COLOR_TEXTURE_ROLES else "Non-Color"
+    )
+
+
+def _load_texture_image(
+    image_path: Path,
+    source: TextureSource,
+    texture_hash: int,
+    role: str,
+) -> bpy.types.Image:
+    interpretation = _texture_interpretation(role)
+    image_name = (
+        f"MGS4_{source.region.upper()}_{texture_hash:08X}_"
+        f"{source.width}x{source.height}_{interpretation}"
+    )
+    image = bpy.data.images.get(image_name)
+    if image is None:
+        image = bpy.data.images.load(str(image_path), check_existing=False)
+        image.name = image_name
+    _configure_image_color_space(image, role)
+    image["mgs4_texture_hash"] = texture_hash
+    image["mgs4_region"] = source.region
+    image["mgs4_interpretation"] = interpretation
+    return image
+
+
+def _missing_texture_image(
+    texture_hash: int,
+    role: str,
+) -> bpy.types.Image:
+    interpretation = _texture_interpretation(role)
+    image_name = f"MGS4_MISSING_{texture_hash:08X}_{interpretation}"
+    image = bpy.data.images.get(image_name)
+    if image is None:
+        image = bpy.data.images.new(
+            image_name,
+            width=8,
+            height=8,
+            alpha=True,
+        )
+        pixels = []
+        for y in range(8):
+            for x in range(8):
+                pixels.extend(
+                    (1.0, 0.0, 1.0, 1.0)
+                    if ((x // 2) + (y // 2)) % 2 == 0
+                    else (0.03, 0.0, 0.03, 1.0)
+                )
+        image.pixels[:] = pixels
+        image.update()
+    _configure_image_color_space(image, role)
+    image["mgs4_missing_texture"] = True
+    image["mgs4_texture_hash"] = texture_hash
+    image["mgs4_interpretation"] = interpretation
+    return image
+
+
+def _new_texture_slot_frame(
+    nodes,
+    parent,
+    *,
+    slot: int,
+    role: str,
+    texture_hash: int,
+    missing: bool,
+):
+    frame = nodes.new("NodeFrame")
+    frame.name = f"MGS4_Slot_{slot:02d}_{role}"
+    frame.label = (
+        f"Slot {slot}: {role.replace('_', ' ').title()} "
+        f"{texture_hash:08X}"
+        + (" (Missing)" if missing else "")
+    )
+    frame.parent = parent
+    frame.location = (0.0, -slot * 260.0)
+    frame.use_custom_color = True
+    if missing:
+        frame.color = (0.55, 0.04, 0.08)
+    elif role in _COLOR_TEXTURE_ROLES:
+        frame.color = (0.12, 0.28, 0.48)
+    else:
+        frame.color = (0.28, 0.16, 0.42)
+    frame["mgs4_slot"] = slot
+    frame["mgs4_role"] = role
+    frame["mgs4_texture_hash"] = texture_hash
+    frame["mgs4_missing_texture"] = missing
+    return frame
+
+
 def _new_texture_nodes(
     material: bpy.types.Material,
     model: MdnModel,
@@ -208,7 +330,8 @@ def _new_texture_nodes(
     preferred_region: str,
     specular_level: float,
     warnings: list[str],
-) -> None:
+    options: MaterialImportOptions,
+) -> _MaterialTextureOutputs:
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     principled = next(
@@ -216,6 +339,17 @@ def _new_texture_nodes(
     )
     roles = _texture_roles(source_material)
     use_uv_1 = bool((source_material.flags >> 16) & 1)
+    outputs = _MaterialTextureOutputs()
+    layer_preview_selected = False
+    texture_frame = nodes.new("NodeFrame")
+    texture_frame.name = f"MGS4_Texture_Roles_{source_material.name_hash:08X}"
+    texture_frame.label = (
+        f"MGS4 Texture Roles | Shader 0x{source_material.flags & 0xFF:02X} "
+        f"| Flags 0x{source_material.flags:08X}"
+    )
+    texture_frame.location = (-1050.0, 420.0)
+    texture_frame.use_custom_color = True
+    texture_frame.color = (0.08, 0.12, 0.18)
 
     for slot, role in enumerate(roles):
         texture_index = source_material.texture_indices[slot]
@@ -226,39 +360,53 @@ def _new_texture_nodes(
             )
             continue
         texture = model.textures[texture_index]
+        missing = False
         try:
             image_path, texture_source = resolver.materialize(
                 texture.name_hash, preferred_region
             )
+            image = _load_texture_image(
+                image_path,
+                texture_source,
+                texture.name_hash,
+                role,
+            )
         except MGS4Error as exc:
             warnings.append(str(exc))
-            continue
+            outputs.missing_count += 1
+            if not options.highlight_missing_textures:
+                continue
+            image = _missing_texture_image(texture.name_hash, role)
+            missing = True
 
-        image_name = (
-            f"MGS4_{texture.name_hash:08X}_{texture_source.width}x"
-            f"{texture_source.height}"
+        slot_frame = _new_texture_slot_frame(
+            nodes,
+            texture_frame,
+            slot=slot,
+            role=role,
+            texture_hash=texture.name_hash,
+            missing=missing,
         )
-        image = bpy.data.images.get(image_name)
-        if image is None:
-            image = bpy.data.images.load(str(image_path), check_existing=True)
-            image.name = image_name
-        if role != "diffuse":
-            image.colorspace_settings.name = "Non-Color"
 
         image_node = nodes.new("ShaderNodeTexImage")
         image_node.name = f"{role}_{texture.name_hash:08X}"
         image_node.label = f"{role.replace('_', ' ').title()} {texture.name_hash:08X}"
         image_node.image = image
-        image_node.location = (-500.0, 360.0 - slot * 240.0)
+        image_node.parent = slot_frame
+        image_node.location = (400.0, 0.0)
         image_node["mgs4_texture_hash"] = texture.name_hash
         image_node["mgs4_texture_flags"] = texture.flags
         image_node["mgs4_role"] = role
+        image_node["mgs4_interpretation"] = _texture_interpretation(role)
+        image_node["mgs4_missing_texture"] = missing
 
         uv_node = nodes.new("ShaderNodeUVMap")
         uv_node.uv_map = "UV1" if use_uv_1 else "UV0"
-        uv_node.location = (-900.0, image_node.location.y)
+        uv_node.parent = slot_frame
+        uv_node.location = (0.0, 0.0)
         mapping = nodes.new("ShaderNodeMapping")
-        mapping.location = (-700.0, image_node.location.y)
+        mapping.parent = slot_frame
+        mapping.location = (200.0, 0.0)
         mapping.inputs["Scale"].default_value[0] = texture.scale_u
         mapping.inputs["Scale"].default_value[1] = texture.scale_v
         mapping.inputs["Location"].default_value[0] = texture.offset_u
@@ -267,18 +415,30 @@ def _new_texture_nodes(
         links.new(mapping.outputs["Vector"], image_node.inputs["Vector"])
 
         if role == "diffuse":
-            links.new(image_node.outputs["Color"], principled.inputs["Base Color"])
+            if outputs.base_color is None:
+                outputs.base_color = image_node.outputs["Color"]
+        elif (
+            role == "layer"
+            and options.layer_mode == LAYER_MODE_PREVIEW
+            and not layer_preview_selected
+        ):
+            outputs.base_color = image_node.outputs["Color"]
+            image_node["mgs4_layer_preview_source"] = True
+            layer_preview_selected = True
         elif role == "opacity":
-            links.new(image_node.outputs["Color"], principled.inputs["Alpha"])
-            _set_transparent(material)
+            if outputs.opacity is None:
+                outputs.opacity = image_node.outputs["Color"]
         elif role in {"normal", "detail_normal", "layer_normal"}:
             separate = nodes.new("ShaderNodeSeparateColor")
             combine = nodes.new("ShaderNodeCombineColor")
             normal_map = nodes.new("ShaderNodeNormalMap")
             normal_map.inputs["Strength"].default_value = 0.5
-            separate.location = (-280.0, image_node.location.y)
-            combine.location = (-80.0, image_node.location.y)
-            normal_map.location = (100.0, image_node.location.y)
+            separate.parent = slot_frame
+            combine.parent = slot_frame
+            normal_map.parent = slot_frame
+            separate.location = (620.0, 0.0)
+            combine.location = (820.0, 0.0)
+            normal_map.location = (1020.0, 0.0)
             combine.inputs["Blue"].default_value = 1.0
             links.new(image_node.outputs["Color"], separate.inputs["Color"])
             links.new(image_node.outputs["Alpha"], combine.inputs["Red"])
@@ -291,7 +451,8 @@ def _new_texture_nodes(
             multiply.operation = "MULTIPLY"
             multiply.use_clamp = True
             multiply.inputs[1].default_value = specular_level
-            multiply.location = (-100.0, image_node.location.y)
+            multiply.parent = slot_frame
+            multiply.location = (620.0, 0.0)
             links.new(
                 image_node.outputs["Color"],
                 multiply.inputs[0],
@@ -300,6 +461,94 @@ def _new_texture_nodes(
                 multiply.outputs["Value"],
                 principled.inputs["Specular IOR Level"],
             )
+    return outputs
+
+
+def _material_vertex_color_support(model: MdnModel) -> tuple[bool, ...]:
+    usage: list[list[bool]] = [[] for _material in model.materials]
+    for geometry in model.meshes:
+        has_vertex_color = (
+            bool(geometry.colors)
+            and len(geometry.colors) == len(geometry.vertices)
+        )
+        for material_index in set(geometry.triangle_materials):
+            if 0 <= material_index < len(usage):
+                usage[material_index].append(has_vertex_color)
+    return tuple(bool(values) and all(values) for values in usage)
+
+
+def _connect_material_presentation(
+    material: bpy.types.Material,
+    principled,
+    diffuse: tuple[float, float, float, float],
+    texture_outputs: _MaterialTextureOutputs,
+    options: MaterialImportOptions,
+    vertex_color_available: bool,
+) -> None:
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    use_vertex_color = options.use_vertex_color and vertex_color_available
+    use_vertex_alpha = options.use_vertex_alpha and vertex_color_available
+    vertex_node = None
+    presentation_frame = None
+
+    if use_vertex_color or use_vertex_alpha:
+        presentation_frame = nodes.new("NodeFrame")
+        presentation_frame.name = "MGS4_Vertex_Color_Presentation"
+        presentation_frame.label = "MGS4 Vertex Color Presentation"
+        presentation_frame.location = (-250.0, -500.0)
+        presentation_frame.use_custom_color = True
+        presentation_frame.color = (0.18, 0.34, 0.16)
+
+        vertex_node = nodes.new("ShaderNodeVertexColor")
+        vertex_node.name = "MGS4_Vertex_Color"
+        vertex_node.label = "MGS4 Vertex Color"
+        vertex_node.layer_name = "Color"
+        vertex_node.parent = presentation_frame
+        vertex_node.location = (0.0, 0.0)
+
+    if use_vertex_color and vertex_node is not None:
+        multiply = nodes.new("ShaderNodeMixRGB")
+        multiply.name = "MGS4_Vertex_Color_Multiply"
+        multiply.label = "Base Color x Vertex Color"
+        multiply.blend_type = "MULTIPLY"
+        multiply.inputs[0].default_value = 1.0
+        multiply.parent = presentation_frame
+        multiply.location = (220.0, 0.0)
+        if texture_outputs.base_color is not None:
+            links.new(texture_outputs.base_color, multiply.inputs[1])
+        else:
+            multiply.inputs[1].default_value = diffuse
+        links.new(vertex_node.outputs["Color"], multiply.inputs[2])
+        links.new(multiply.outputs["Color"], principled.inputs["Base Color"])
+    elif texture_outputs.base_color is not None:
+        links.new(texture_outputs.base_color, principled.inputs["Base Color"])
+
+    alpha_output = texture_outputs.opacity
+    if use_vertex_alpha and vertex_node is not None:
+        if alpha_output is not None:
+            multiply_alpha = nodes.new("ShaderNodeMath")
+            multiply_alpha.name = "MGS4_Vertex_Alpha_Multiply"
+            multiply_alpha.label = "Opacity x Vertex Alpha"
+            multiply_alpha.operation = "MULTIPLY"
+            multiply_alpha.use_clamp = True
+            multiply_alpha.parent = presentation_frame
+            multiply_alpha.location = (220.0, -180.0)
+            links.new(alpha_output, multiply_alpha.inputs[0])
+            links.new(vertex_node.outputs["Alpha"], multiply_alpha.inputs[1])
+            alpha_output = multiply_alpha.outputs["Value"]
+        else:
+            alpha_output = vertex_node.outputs["Alpha"]
+
+    if alpha_output is not None:
+        links.new(alpha_output, principled.inputs["Alpha"])
+        _set_transparent(material)
+
+    material["mgs4_layer_mode"] = options.layer_mode
+    material["mgs4_vertex_color_available"] = vertex_color_available
+    material["mgs4_vertex_color_enabled"] = use_vertex_color
+    material["mgs4_vertex_alpha_enabled"] = use_vertex_alpha
+    material["mgs4_missing_texture_count"] = texture_outputs.missing_count
 
 
 def _build_materials(
@@ -307,9 +556,11 @@ def _build_materials(
     resolver: TextureResolver | None,
     preferred_region: str,
     warnings: list[str],
+    options: MaterialImportOptions,
 ) -> tuple[bpy.types.Material, ...]:
     materials = []
-    for source in model.materials:
+    vertex_color_support = _material_vertex_color_support(model)
+    for material_index, source in enumerate(model.materials):
         name = f"MGS4_MAT_{source.name_hash:08X}"
         material = bpy.data.materials.new(name)
         material.use_nodes = True
@@ -341,8 +592,9 @@ def _build_materials(
             principled.inputs["Specular IOR Level"].default_value = 0.0
             principled.inputs["Roughness"].default_value = 1.0
             material.roughness = 1.0
+        texture_outputs = _MaterialTextureOutputs()
         if resolver is not None and source.texture_count:
-            _new_texture_nodes(
+            texture_outputs = _new_texture_nodes(
                 material,
                 model,
                 source,
@@ -350,7 +602,16 @@ def _build_materials(
                 preferred_region,
                 specular_level,
                 warnings,
+                options,
             )
+        _connect_material_presentation(
+            material,
+            principled,
+            diffuse,
+            texture_outputs,
+            options,
+            vertex_color_support[material_index],
+        )
         materials.append(material)
     return tuple(materials)
 
@@ -572,14 +833,28 @@ def import_mdn_model(
     resolver: TextureResolver | None = None,
     preferred_region: str = "common",
     parent_collection: bpy.types.Collection | None = None,
+    material_options: MaterialImportOptions | None = None,
 ) -> ModelImportResult:
+    material_options = material_options or MaterialImportOptions()
     warnings: list[str] = []
     root = bpy.data.collections.new(name)
     (parent_collection or context.collection).children.link(root)
     root["mgs4_filename_hash"] = model.header.filename_hash
     root["mgs4_scale"] = scale
+    root["mgs4_layer_mode"] = material_options.layer_mode
+    root["mgs4_use_vertex_color"] = material_options.use_vertex_color
+    root["mgs4_use_vertex_alpha"] = material_options.use_vertex_alpha
+    root["mgs4_highlight_missing_textures"] = (
+        material_options.highlight_missing_textures
+    )
 
-    materials = _build_materials(model, resolver, preferred_region, warnings)
+    materials = _build_materials(
+        model,
+        resolver,
+        preferred_region,
+        warnings,
+        material_options,
+    )
     armature_object, bone_names = _create_armature(model, name, scale, root)
     group_collections = _create_group_collections(model, root)
     objects = []

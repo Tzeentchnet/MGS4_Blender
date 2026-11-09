@@ -114,7 +114,8 @@ values fall back to `(0.8, 0.8, 0.8, 1.0)`. Components are clamped to
 Blender's zero-to-one range.
 
 The alpha value is assigned to the Principled input, but the material remains
-opaque unless an `opacity` texture role enables blended rendering.
+opaque unless an `opacity` texture role or the opt-in vertex-alpha setting
+enables blended rendering.
 
 ### Specular and roughness
 
@@ -133,8 +134,16 @@ non-metallic.
 
 - Every resolved texture receives an Image Texture, UV Map, and Mapping node.
 - MDN scale and offset values drive the Mapping node.
-- Non-diffuse images use Blender's Non-Color color space.
-- Diffuse color connects to Base Color.
+- `diffuse`, `layer`, and `environment` roles use sRGB Images. Normal,
+  specular, opacity, incidence, gradient, and unknown roles use Non-Color
+  Images.
+- Blender Images are keyed by region, texture hash, dimensions, and
+  `COLOR`/`DATA` interpretation. If one game texture hash is used in both
+  classes, the importer deliberately creates separate Image datablocks so
+  their Image-level color-space settings cannot overwrite one another.
+- Diffuse color connects to Base Color in Conservative mode. First Layer
+  Preview substitutes the first inferred `layer` texture without guessing a
+  mask or blend operation.
 - Opacity color connects to Alpha and enables blended rendering.
 - Specular color is multiplied by the converted specular level before
   connecting to Specular IOR Level.
@@ -143,6 +152,31 @@ non-metallic.
 - Only the primary `normal` role is connected automatically. Detail, layer,
   incidence, environment, gradient, and unknown nodes remain available for
   inspection or manual node work.
+- An outer frame identifies the complete material flags and shader variant.
+  Nested slot frames identify role, slot, hash, and missing state.
+
+### Missing textures
+
+With **Highlight Missing Textures** enabled in the add-on preferences, an
+unresolved texture gets an 8-by-8 magenta/dark checker Image. The expected
+Image Texture, UV Map, and Mapping nodes remain in place, the warning is still
+reported, and the Image and nodes carry missing-texture metadata. Color and
+data roles receive appropriately configured checker datablocks.
+
+Disable the preference to report the warning and omit the unresolved texture
+node. The material's `mgs4_missing_texture_count` continues to record how many
+declared slots could not be resolved.
+
+### Vertex colors
+
+When **Vertex Color RGB** is enabled, the `Color` corner attribute multiplies
+the selected diffuse or layer-preview source before Base Color. The importer
+only enables this connection when every mesh using that material has a valid
+color layer, avoiding unpredictable fallback values on mixed-use materials.
+
+**Vertex Color Alpha** is independent and disabled by default. When enabled,
+it drives Alpha, multiplying an existing opacity texture when present, and
+enables blended rendering. Disabling alpha does not disable RGB tinting.
 
 ## Texture lookup
 
@@ -198,6 +232,15 @@ Existing non-empty files are reused. New files are written to a
 process-specific temporary path and atomically replaced into the final
 location. The game archives remain unchanged.
 
+Loaded Blender Images use names shaped like:
+
+```text
+MGS4_<REGION>_<HASH>_<WIDTH>x<HEIGHT>_<COLOR|DATA>
+```
+
+Missing checker Images use
+`MGS4_MISSING_<HASH>_<COLOR|DATA>`.
+
 ## Custom properties
 
 | Owner | Property | Meaning |
@@ -205,9 +248,19 @@ location. The game archives remain unchanged.
 | Material | `mgs4_flags` | Complete MDN material flags |
 | Material | `mgs4_name_hash` | Material name hash |
 | Material | `mgs4_texture_count` | Declared active texture count |
+| Material | `mgs4_layer_mode` | Conservative or first-layer presentation |
+| Material | `mgs4_vertex_color_available` | All users have a valid `Color` layer |
+| Material | `mgs4_vertex_color_enabled` | Vertex RGB is connected |
+| Material | `mgs4_vertex_alpha_enabled` | Vertex alpha is connected |
+| Material | `mgs4_missing_texture_count` | Number of unresolved texture slots |
+| Image | `mgs4_texture_hash` | Source texture hash |
+| Image | `mgs4_interpretation` | `COLOR` or `DATA` |
+| Image | `mgs4_missing_texture` | Generated missing-texture checker |
 | Image Texture node | `mgs4_texture_hash` | Referenced texture hash |
 | Image Texture node | `mgs4_texture_flags` | MDN texture flags |
 | Image Texture node | `mgs4_role` | Inferred slot role |
+| Image Texture node | `mgs4_interpretation` | `COLOR` or `DATA` |
+| Image Texture node | `mgs4_missing_texture` | Texture could not be resolved |
 
 ## Game shader relationship
 
@@ -223,8 +276,9 @@ not recovered HLSL and not a byte-for-byte recreation of the game renderer.
 
 - Unsupported texture formats raise an explicit error.
 - Texture-role mappings are incomplete for unknown material variants.
-- Layer, detail, environment, incidence, and gradient composition is not
-  reconstructed automatically.
+- Layer blending, detail composition, environment sampling, incidence, and
+  gradient composition are not reconstructed automatically. First Layer
+  Preview is a direct Base Color substitution, not inferred blending.
 - Cubemap or other runtime sampling behavior is not inferred from the image
   payload alone.
 - Materials and converted textures are imported, not exported back to MDN or

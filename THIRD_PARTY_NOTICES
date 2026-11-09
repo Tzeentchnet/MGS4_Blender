@@ -13,6 +13,20 @@ The PC VPAK, raw-LZ4, PC_TXN_UP, and texture descriptor layouts were studied
 from LittleBitUA/GUNS-OF-THE-PATRIOTS-LOCALIZATION-TOOL, which is distributed
 under the MIT License.
 
+Solideye asset-name dictionary
+------------------------------
+Copyright (c) Jayveer
+
+The identifier wordlist in
+`mgs4_remastered_importer/resources/solideye_dictionary.txt` is redistributed
+unmodified from the Solideye 1.2 release:
+
+https://github.com/Jayveer/Solideye/releases/tag/1.2
+
+The Solideye README states that the project is distributed under the MIT
+License. The bundled file has SHA-256 checksum
+79B0AAD6A2F9EEA92131728F81B3EB912993A574C9328B96993E29A42B0F0583.
+
 MIT License
 -----------
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -38,4 +52,5 @@ Additional format references
 Jayveer/Solideye and Jayveer/MGS-MDN-Noesis were used as behavioral and format
 references. cipherxof/Haven was used as a behavioral reference for GCX model
 placement and GEOM effect structures. Their source is not redistributed by
-this project.
+this project; only the Solideye identifier wordlist described above is
+included.

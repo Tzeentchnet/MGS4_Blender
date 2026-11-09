@@ -13,12 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from mgs4_remastered_importer.blender_import import (  # noqa: E402
+    LAYER_MODE_PREVIEW,
+    MaterialImportOptions,
     _legacy_specular,
+    _load_texture_image,
     _texture_roles,
     game_transform_matrix,
     import_mdn_model,
     import_motion_archive,
 )
+from mgs4_remastered_importer.errors import MGS4Error  # noqa: E402
 from mgs4_remastered_importer.formats.common import hash_name  # noqa: E402
 from mgs4_remastered_importer.formats.mdn import (  # noqa: E402
     MdnMaterial,
@@ -173,6 +177,188 @@ with tempfile.TemporaryDirectory() as temporary:
         node.image.colorspace_settings.name == "Non-Color"
         for node in opacity_nodes
     )
+
+    texture_hash = model.textures[0].name_hash
+    image_path, texture_source = resolver.materialize(texture_hash, "common")
+    color_image = _load_texture_image(
+        image_path,
+        texture_source,
+        texture_hash,
+        "diffuse",
+    )
+    data_image = _load_texture_image(
+        image_path,
+        texture_source,
+        texture_hash,
+        "normal",
+    )
+    assert color_image != data_image
+    assert color_image.colorspace_settings.name == "sRGB"
+    assert data_image.colorspace_settings.name == "Non-Color"
+    assert color_image["mgs4_interpretation"] == "COLOR"
+    assert data_image["mgs4_interpretation"] == "DATA"
+
+    layer_model = parse_mdn(
+        archive.fetch("common/stage/slot/00000001/cache/0006860b.mdn")
+    )
+    layer_material_index = next(
+        index
+        for index, source_material in enumerate(layer_model.materials)
+        if "layer" in _texture_roles(source_material)
+    )
+
+    conservative_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    conservative = import_mdn_model(
+        bpy.context,
+        layer_model,
+        name="MGS4_LAYER_CONSERVATIVE",
+        resolver=resolver,
+    )
+    assert not conservative.warnings
+    conservative_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in conservative_existing
+    )
+    layer_material_hash = layer_model.materials[
+        layer_material_index
+    ].name_hash
+    conservative_material = next(
+        material
+        for material in conservative_materials
+        if material["mgs4_name_hash"] == layer_material_hash
+    )
+    conservative_principled = next(
+        node
+        for node in conservative_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    conservative_multiply = conservative_principled.inputs[
+        "Base Color"
+    ].links[0].from_node
+    assert conservative_multiply.name == "MGS4_Vertex_Color_Multiply"
+    assert conservative_multiply.inputs[1].links[0].from_node[
+        "mgs4_role"
+    ] == "diffuse"
+    assert conservative_material["mgs4_vertex_color_enabled"]
+    assert not conservative_material["mgs4_vertex_alpha_enabled"]
+    assert not conservative_principled.inputs["Alpha"].is_linked
+    assert any(
+        node.get("mgs4_role") == "layer"
+        for node in conservative_material.node_tree.nodes
+    )
+
+    preview_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    preview = import_mdn_model(
+        bpy.context,
+        layer_model,
+        name="MGS4_LAYER_PREVIEW",
+        resolver=resolver,
+        material_options=MaterialImportOptions(
+            layer_mode=LAYER_MODE_PREVIEW,
+            use_vertex_alpha=True,
+        ),
+    )
+    assert not preview.warnings
+    preview_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in preview_existing
+    )
+    preview_material = next(
+        material
+        for material in preview_materials
+        if material["mgs4_name_hash"] == layer_material_hash
+    )
+    preview_principled = next(
+        node
+        for node in preview_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    preview_multiply = preview_principled.inputs[
+        "Base Color"
+    ].links[0].from_node
+    preview_source = preview_multiply.inputs[1].links[0].from_node
+    assert preview_source["mgs4_role"] == "layer"
+    assert preview_source["mgs4_layer_preview_source"]
+    assert preview_material["mgs4_layer_mode"] == LAYER_MODE_PREVIEW
+    assert preview_material["mgs4_vertex_color_enabled"]
+    assert preview_material["mgs4_vertex_alpha_enabled"]
+    assert preview_principled.inputs["Alpha"].is_linked
+    assert (
+        preview_principled.inputs["Alpha"].links[0].from_node.bl_idname
+        == "ShaderNodeVertexColor"
+    )
+    assert preview_material.surface_render_method == "BLENDED"
+
+    class MissingTextureResolver:
+        def materialize(self, texture_hash, preferred_region):
+            raise MGS4Error(
+                f"Test texture {texture_hash:08X} missing in {preferred_region}"
+            )
+
+    missing_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    missing = import_mdn_model(
+        bpy.context,
+        model,
+        name="MGS4_MISSING_CHECKERS",
+        resolver=MissingTextureResolver(),
+    )
+    missing_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in missing_existing
+    )
+    missing_nodes = [
+        node
+        for material in missing_materials
+        for node in material.node_tree.nodes
+        if (
+            node.bl_idname == "ShaderNodeTexImage"
+            and node.get("mgs4_missing_texture")
+        )
+    ]
+    assert missing.warnings
+    assert missing_nodes
+    assert all(node.image["mgs4_missing_texture"] for node in missing_nodes)
+    assert sum(
+        material["mgs4_missing_texture_count"]
+        for material in missing_materials
+    ) > 0
+
+    skipped_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    skipped = import_mdn_model(
+        bpy.context,
+        model,
+        name="MGS4_MISSING_SKIPPED",
+        resolver=MissingTextureResolver(),
+        material_options=MaterialImportOptions(
+            highlight_missing_textures=False,
+        ),
+    )
+    skipped_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in skipped_existing
+    )
+    assert skipped.warnings
+    assert not any(
+        node.get("mgs4_missing_texture")
+        for material in skipped_materials
+        for node in material.node_tree.nodes
+    )
+    assert sum(
+        material["mgs4_missing_texture_count"]
+        for material in skipped_materials
+    ) > 0
 
     animated = import_motion_archive(
         bpy.context,

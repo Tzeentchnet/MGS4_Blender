@@ -16,7 +16,15 @@ Implementations:
 The catalog indexes `.mtar` entries in the stage VPAKs. Loose MTAR files can
 also be imported through Blender's File > Import menu.
 
-Before importing an animation, an armature object must be selected. Tracks
+Direct installed-game Model imports enable automatic animation import by
+default. For a skinned MDN, candidates are limited to MTARs in the same
+virtual directory and must have a non-empty bone table that is a subset of the
+model skeleton. One archive is selected by preferring an exact skeleton, then
+the largest compatible bone table, then the greatest source clip count, and
+finally path order. Stage, mission, and loose MDN imports do not perform this
+automatic search.
+
+For manual animation imports, an armature object must be selected. Tracks
 match Blender bones by the uppercase hexadecimal form of their source bone
 hash. Matching model and motion archives commonly reside in the same stage
 cache, but this is a convention rather than an enforced relationship.
@@ -131,7 +139,8 @@ An Action with no matching curves is removed and counted as skipped.
 
 The parser API can select a set of clip hashes and can stop after a maximum
 number of decoded clips. The Blender UI exposes an Action Limit, defaulting to
-100; zero imports every clip.
+100; zero imports every clip. The same limit applies to the single archive
+chosen during automatic Model import.
 
 Tracks whose bone hashes are absent from the armature are skipped and
 reported. The remaining tracks still produce a valid Action.

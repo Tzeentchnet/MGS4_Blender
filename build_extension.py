@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parent
 PACKAGE = ROOT / "mgs4_remastered_importer"
-OUTPUT = ROOT / "dist" / "mgs4_remastered_importer-1.0.0.zip"
+with (PACKAGE / "blender_manifest.toml").open("rb") as manifest_file:
+    VERSION = tomllib.load(manifest_file)["version"]
+OUTPUT = ROOT / "dist" / f"mgs4_remastered_importer-{VERSION}.zip"
 
 
 def build() -> Path:

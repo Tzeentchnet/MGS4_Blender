@@ -119,6 +119,18 @@ Weights are normalized while parsing and again after invalid influences are
 removed. A mesh with valid influences receives vertex groups, an Armature
 modifier, and the armature as its parent.
 
+## Automatic animations
+
+Direct installed-game Model imports enable **Import Animations** by default.
+When the MDN contains weighted skin data and creates an armature, the importer
+searches the same virtual cache directory for MTAR archives whose complete
+bone table exists in the model skeleton. It imports one best match, preferring
+an exact skeleton, then greater bone coverage, then a larger clip library.
+
+The shared **Action Limit** controls how many clips are decoded and imported.
+Disable **Import Animations** for a model-only import. Stage, mission, and
+loose MDN imports do not automatically add Actions.
+
 ## Coordinate and attribute conversion
 
 Game coordinates are converted as:

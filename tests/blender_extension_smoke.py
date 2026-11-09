@@ -23,6 +23,10 @@ addon_key = next(
 )
 preferences = bpy.context.preferences.addons[addon_key].preferences
 settings = bpy.context.scene.mgs4_importer
+assert preferences.highlight_missing_textures
+assert settings.material_layer_mode == "CONSERVATIVE"
+assert settings.use_vertex_color
+assert not settings.use_vertex_alpha
 
 
 def choose_result(virtual_path: str) -> None:
@@ -34,15 +38,29 @@ def choose_result(virtual_path: str) -> None:
 
 
 preferences.game_root = r"Z:\MGS4_EXTENSION_SMOKE_MISSING"
+preferences.highlight_missing_textures = False
 loose_path = data_root / "common" / "mesh" / "pc" / "0051b7f4.mdn"
 assert bpy.ops.import_scene.mgs4_mdn(
     filepath=str(loose_path),
     import_materials=False,
+    material_layer_mode="LAYER_PREVIEW",
+    use_vertex_color=False,
+    use_vertex_alpha=True,
 ) == {"FINISHED"}
+loose_collection = next(
+    collection
+    for collection in bpy.data.collections
+    if collection.get("mgs4_source_file") == str(loose_path)
+)
+assert loose_collection["mgs4_layer_mode"] == "LAYER_PREVIEW"
+assert not loose_collection["mgs4_use_vertex_color"]
+assert loose_collection["mgs4_use_vertex_alpha"]
+assert not loose_collection["mgs4_highlight_missing_textures"]
 
 with tempfile.TemporaryDirectory() as temporary:
     preferences.game_root = str(install_root)
     preferences.cache_root = temporary
+    preferences.highlight_missing_textures = True
 
     settings.asset_kind = "MODEL"
     assert len(settings.results) > 6_000
@@ -52,7 +70,19 @@ with tempfile.TemporaryDirectory() as temporary:
     ].virtual_path
     choose_result("common/stage/stage01/s01a00l/cache/00e46846.mdn")
     settings.import_materials = True
+    assert settings.import_animations
+    settings.animation_limit = 3
     assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    model_collection = next(
+        collection
+        for collection in bpy.data.collections
+        if collection.get("mgs4_virtual_path")
+        == "common/stage/stage01/s01a00l/cache/00e46846.mdn"
+    )
+    assert model_collection["mgs4_layer_mode"] == "CONSERVATIVE"
+    assert model_collection["mgs4_use_vertex_color"]
+    assert not model_collection["mgs4_use_vertex_alpha"]
+    assert model_collection["mgs4_highlight_missing_textures"]
     armature = bpy.context.view_layer.objects.active
     assert armature is not None and armature.type == "ARMATURE"
     assert not armature.show_in_front
@@ -89,15 +119,6 @@ with tempfile.TemporaryDirectory() as temporary:
         for node in normal_nodes
     )
 
-    settings.asset_kind = "MOTION"
-    assert len(settings.results) > 200
-    settings.search_text = "00815bae.mtar"
-    settings.animation_limit = 3
-    assert settings.search_text in settings.results[
-        settings.result_index
-    ].virtual_path
-    choose_result("common/stage/stage01/s01a00l/cache/00815bae.mtar")
-    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
     assert armature.animation_data is not None
     assert armature.animation_data.action is not None
     action = bpy.data.actions["00815BAE_0000_009A5583"]

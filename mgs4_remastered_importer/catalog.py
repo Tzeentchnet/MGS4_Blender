@@ -11,6 +11,7 @@ from .formats.common import strcode_from_name
 from .formats.gcx import StageLayout, extract_stage_layout, parse_gcx
 from .formats.geom import GeomEffects, parse_geom_effects
 from .formats.mdn import MdnModel
+from .formats.mtar import MotionArchive, parse_mtar
 from .formats.vpak import VpakArchive
 
 
@@ -69,6 +70,37 @@ class StageResources:
 class StageManifest:
     models: tuple[AssetRecord, ...]
     unresolved_models: tuple[str, ...]
+
+
+def select_default_motion(
+    model_bone_hashes: Sequence[int],
+    candidates: Sequence[tuple[AssetRecord, MotionArchive]],
+) -> AssetRecord | None:
+    model_bones = frozenset(model_bone_hashes)
+    compatible = []
+    for asset, archive in candidates:
+        motion_bones = frozenset(archive.bone_hashes)
+        if (
+            asset.kind != MOTION
+            or not motion_bones
+            or archive.source_motion_count <= 0
+            or not motion_bones.issubset(model_bones)
+        ):
+            continue
+        compatible.append((asset, archive, motion_bones))
+    if not compatible:
+        return None
+
+    return min(
+        compatible,
+        key=lambda candidate: (
+            candidate[2] != model_bones,
+            -len(candidate[2]),
+            -candidate[1].source_motion_count,
+            candidate[0].virtual_path.lower(),
+            candidate[0].virtual_path,
+        ),
+    )[0]
 
 
 def _model_bounds(
@@ -224,6 +256,8 @@ class GameCatalog:
         self._models_by_hash: dict[int, tuple[AssetRecord, ...]] = {}
         self._models_by_path: dict[str, AssetRecord] = {}
         self._models_by_stage_suffix: dict[str, tuple[AssetRecord, ...]] = {}
+        self._motions_by_directory: dict[str, tuple[AssetRecord, ...]] = {}
+        self._motion_metadata: dict[AssetRecord, MotionArchive] = {}
 
     def _archive(self, path: Path) -> VpakArchive:
         archive = self._archives.get(path)
@@ -408,6 +442,18 @@ class GameCatalog:
             )
             for suffix, records in suffixes.items()
         }
+        motion_directories: dict[str, list[AssetRecord]] = {}
+        for asset in assets:
+            if asset.kind != MOTION:
+                continue
+            directory = asset.virtual_path.rsplit("/", 1)[0].lower()
+            motion_directories.setdefault(directory, []).append(asset)
+        self._motions_by_directory = {
+            directory: tuple(
+                sorted(records, key=lambda item: item.virtual_path)
+            )
+            for directory, records in motion_directories.items()
+        }
         return tuple(sorted(assets, key=lambda item: (item.kind, item.virtual_path)))
 
     @property
@@ -441,6 +487,24 @@ class GameCatalog:
             if len(results) >= limit:
                 break
         return tuple(results)
+
+    def default_motion_for_model(
+        self,
+        model_asset: AssetRecord,
+        model_bone_hashes: Sequence[int],
+    ) -> AssetRecord | None:
+        if model_asset.kind != MODEL:
+            raise ValueError("Default motions can only be selected for models")
+        _ = self.assets
+        directory = model_asset.virtual_path.rsplit("/", 1)[0].lower()
+        candidates = []
+        for asset in self._motions_by_directory.get(directory, ()):
+            archive = self._motion_metadata.get(asset)
+            if archive is None:
+                archive = parse_mtar(self.read(asset), clip_hashes=set())
+                self._motion_metadata[asset] = archive
+            candidates.append((asset, archive))
+        return select_default_motion(model_bone_hashes, candidates)
 
     def stage_models(self, prefix: str) -> tuple[AssetRecord, ...]:
         _ = self.assets

@@ -5,18 +5,26 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from mgs4_remastered_importer.asset_names import (
+    AssetNameError,
+    AssetNameRegistry,
+    asset_hash_from_path,
+    load_user_names,
+)
 from mgs4_remastered_importer.catalog import (
     MISSION,
     MODEL,
     MOTION,
     STAGE,
+    AssetRecord,
     GameCatalog,
     infer_auxiliary_stage_models,
     infer_exterior_stage_models,
+    select_default_motion,
 )
 from mgs4_remastered_importer.errors import FormatError
 from mgs4_remastered_importer.formats.mdn import parse_mdn
-from mgs4_remastered_importer.formats.mtar import parse_mtar
+from mgs4_remastered_importer.formats.mtar import MotionArchive, parse_mtar
 from mgs4_remastered_importer.formats.texture import TextureResolver, _write_tga
 from mgs4_remastered_importer.formats.vpak import (
     VpakArchive,
@@ -37,6 +45,101 @@ MOTION_PATH = "common/stage/stage01/s01a00l/cache/0005bb6e.mtar"
 CHARACTER_MOTION_PATH = "common/stage/stage01/s01a00l/cache/00815bae.mtar"
 RESTART_STRIP_PATH = "common/stage/stage00/r_sna01/resident/00397327.mdn"
 NON_MDN_PATH = "common/stage/slot/00000027/cache/00560e6d.mdn"
+BUNDLED_NAMES = (
+    Path(__file__).resolve().parents[1]
+    / "mgs4_remastered_importer"
+    / "resources"
+    / "solideye_dictionary.txt"
+)
+
+
+class AssetNameTests(unittest.TestCase):
+    def test_hash_is_parsed_from_asset_filename(self):
+        self.assertEqual(
+            asset_hash_from_path("common/mesh/pc/00c3a92a.mdn"),
+            0x00C3A92A,
+        )
+        self.assertEqual(asset_hash_from_path(r"cache\000062b5.mdn"), 0x000062B5)
+        self.assertIsNone(asset_hash_from_path("cache/model.mdn"))
+        self.assertIsNone(asset_hash_from_path("cache/123456789.mdn"))
+
+    def test_bundled_names_preserve_collisions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            registry = AssetNameRegistry.load(
+                BUNDLED_NAMES,
+                Path(temporary) / "asset_names.json",
+            )
+        self.assertEqual(
+            registry.bundled_candidates(0x000062B5),
+            ("s01a_bpot_a0_sk",),
+        )
+        self.assertEqual(
+            registry.bundled_candidates(0x0031397B),
+            ("nwp_def", "p90_def"),
+        )
+        self.assertEqual(registry.display_name(0x00C3A92A), "")
+
+    def test_custom_name_overrides_and_persists(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            wordlist = directory / "bundled.txt"
+            wordlist.write_text("known_name\n", encoding="utf-8")
+            user_path = directory / "asset_names.json"
+            registry = AssetNameRegistry.load(wordlist, user_path)
+            name_hash = next(iter(registry.bundled_names))
+
+            registry.set_custom_name(name_hash, "Friendly Name")
+            self.assertEqual(registry.display_name(name_hash), "Friendly Name")
+            self.assertEqual(
+                registry.searchable_names(name_hash),
+                ("Friendly Name", "known_name"),
+            )
+            reloaded = AssetNameRegistry.load(wordlist, user_path)
+            self.assertEqual(reloaded.custom_name(name_hash), "Friendly Name")
+
+            self.assertTrue(reloaded.remove_custom_name(name_hash))
+            self.assertEqual(reloaded.display_name(name_hash), "known_name")
+            self.assertFalse(reloaded.remove_custom_name(name_hash))
+
+    def test_import_merges_without_overwriting_by_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            wordlist = directory / "bundled.txt"
+            wordlist.write_text("known_name\n", encoding="utf-8")
+            user_path = directory / "asset_names.json"
+            registry = AssetNameRegistry.load(wordlist, user_path)
+            registry.set_custom_name(1, "Existing")
+
+            imported_path = directory / "imported.json"
+            imported_path.write_text(
+                '{"schema_version": 1, "names": {'
+                '"00000001": "Replacement", "00000002": "Added"}}',
+                encoding="utf-8",
+            )
+            result = registry.import_custom_names(
+                imported_path,
+                overwrite_existing=False,
+            )
+            self.assertEqual((result.added, result.updated, result.skipped), (1, 0, 1))
+            self.assertEqual(registry.custom_name(1), "Existing")
+            self.assertEqual(registry.custom_name(2), "Added")
+
+            result = registry.import_custom_names(
+                imported_path,
+                overwrite_existing=True,
+            )
+            self.assertEqual((result.added, result.updated, result.skipped), (0, 1, 1))
+            self.assertEqual(registry.custom_name(1), "Replacement")
+
+    def test_invalid_user_dictionary_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "invalid.json"
+            path.write_text(
+                '{"schema_version": 1, "names": {"not-a-hash": "Name"}}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssetNameError, "Invalid asset hash"):
+                load_user_names(path)
 
 
 class Lz4Tests(unittest.TestCase):
@@ -80,6 +183,59 @@ class TextureConversionTests(unittest.TestCase):
                     )
                 ),
             )
+
+
+class MotionSelectionTests(unittest.TestCase):
+    @staticmethod
+    def _candidate(
+        virtual_path: str,
+        bone_hashes: tuple[int, ...],
+        clip_count: int,
+    ) -> tuple[AssetRecord, MotionArchive]:
+        return (
+            AssetRecord(MOTION, virtual_path, None, 0),
+            MotionArchive(
+                max_joint_count=0,
+                max_effect_position_count=0,
+                flags=0,
+                bone_hashes=bone_hashes,
+                clips=(),
+                source_motion_count=clip_count,
+            ),
+        )
+
+    def test_exact_skeleton_has_priority(self):
+        selected = select_default_motion(
+            (1, 2, 3),
+            (
+                self._candidate("cache/partial.mtar", (1, 2), 1_000),
+                self._candidate("cache/exact.mtar", (1, 2, 3), 1),
+            ),
+        )
+        self.assertEqual(selected.virtual_path, "cache/exact.mtar")
+
+    def test_coverage_clip_count_and_path_break_ties(self):
+        selected = select_default_motion(
+            (1, 2, 3, 4),
+            (
+                self._candidate("cache/small.mtar", (1,), 1_000),
+                self._candidate("cache/short.mtar", (1, 2), 5),
+                self._candidate("cache/z.mtar", (1, 2), 10),
+                self._candidate("cache/a.mtar", (1, 2), 10),
+            ),
+        )
+        self.assertEqual(selected.virtual_path, "cache/a.mtar")
+
+    def test_incompatible_and_empty_archives_are_ignored(self):
+        selected = select_default_motion(
+            (1, 2, 3),
+            (
+                self._candidate("cache/incompatible.mtar", (1, 4), 10),
+                self._candidate("cache/empty-bones.mtar", (), 10),
+                self._candidate("cache/empty-clips.mtar", (1,), 0),
+            ),
+        )
+        self.assertIsNone(selected)
 
 
 @unittest.skipUnless(STAGE_PAK.is_file(), "MGS4 installation is not available")
