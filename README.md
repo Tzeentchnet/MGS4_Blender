@@ -4,6 +4,24 @@ A Blender 5.2 extension for importing assets from the PC release of **METAL
 GEAR SOLID 4**. It reads the installed game data directly with Python and does
 not run the game executable, Solideye, or any other bundled executable.
 
+## Showcase
+
+### Textured character and animation
+
+![Textured mem_def_a soldier imported and posed in Blender](docs/images/character-mem-def-a.png)
+
+The `mem_def_a` character imported with its armature, resolved materials, and
+PC textures, then posed from the automatically matched MTAR animation.
+
+### Textured stage area
+
+![Textured S01A00L stage area assembled in Blender](docs/images/level-s01a00l.png)
+
+The dense S01A00L environment assembled from its GCX stage model set with
+resolved PC textures. Both screenshots were rendered in Blender 5.2 from data
+imported directly by the extension; only presentation lighting and cameras
+were added for the images.
+
 ## Features
 
 - Reads PC `VPAK` archives and their chunked raw-LZ4 entries.
