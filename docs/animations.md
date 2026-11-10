@@ -21,12 +21,17 @@ default. For a skinned MDN, candidates are limited to MTARs in the same
 virtual directory and must have a non-empty bone table that is a subset of the
 model skeleton. If that directory has no compatible archive, the importer
 searches the remaining MTARs in the same region and stage chapter. Local-cache
-matches always retain priority. Within the selected scope, one archive is
-chosen by preferring an exact skeleton, then the largest compatible bone
-table, then the greatest source clip count, and finally path order. This
-restores chapter-shared animation libraries such as `0084802F.mtar` for
-`00AEE46B.mdn`. Stage, mission, and loose MDN imports do not perform this
-automatic search.
+matches always retain priority. If neither scope contains a compatible
+archive, the importer searches immediate caches containing another copy of
+the same model filename hash. This restores reused-model motion libraries
+without performing an unrestricted global skeleton match; for example, all
+six copies of `cwr_hel_def` (`00463172`) resolve the two clips in
+`00489370.mtar`, including stage-02, stage-03, and WW copies that have no local
+archive. Within the selected scope, one archive is chosen by preferring an
+exact skeleton, then the largest compatible bone table, then the greatest
+source clip count, and finally path order. The chapter fallback similarly
+restores `0084802F.mtar` for `00AEE46B.mdn`. Stage, mission, and loose MDN
+imports do not perform this automatic search.
 
 For manual animation imports, an armature object must be selected. Tracks
 match Blender bones by the uppercase hexadecimal form of their source bone

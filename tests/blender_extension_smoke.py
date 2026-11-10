@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 from pathlib import Path
 import tempfile
@@ -25,6 +26,7 @@ preferences = bpy.context.preferences.addons[addon_key].preferences
 settings = bpy.context.scene.mgs4_importer
 assert preferences.highlight_missing_textures
 assert preferences.hide_inferred_lods
+assert preferences.hide_duplicate_entries
 assert settings.material_layer_mode == "CONSERVATIVE"
 assert settings.use_vertex_color
 assert not settings.use_vertex_alpha
@@ -109,7 +111,30 @@ with tempfile.TemporaryDirectory() as temporary:
         )
 
     settings.asset_kind = "MODEL"
-    assert len(settings.results) > 6_000
+    assert len(settings.results) > 3_500
+    visible_model_stems = tuple(
+        Path(item.virtual_path).stem.lower()
+        for item in settings.results
+    )
+    assert len(visible_model_stems) == len(set(visible_model_stems))
+    default_shot_shell_paths = tuple(
+        item.virtual_path
+        for item in settings.results
+        if item.virtual_path.lower().endswith("/00e1a168.mdn")
+    )
+    assert default_shot_shell_paths == (
+        "common/stage/stage00/s00a10l/cache/00e1a168.mdn",
+    )
+    deduplicated_model_count = len(settings.results)
+    preferences.hide_duplicate_entries = False
+    assert len(settings.results) > deduplicated_model_count
+    assert len(
+        [
+            item
+            for item in settings.results
+            if item.virtual_path.lower().endswith("/00e1a168.mdn")
+        ]
+    ) == 27
     lod_paths = {
         "common/stage/stage02/s02a40l/cache/0051d172.mdn",
         "common/stage/stage02/s02a40l/cache/0051a3f7.mdn",
@@ -200,6 +225,107 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert not planar_variant_50_principled.inputs["Alpha"].is_linked
 
+    shot_shell_paths = tuple(
+        item.virtual_path
+        for item in settings.results
+        if item.virtual_path.lower().endswith("/00e1a168.mdn")
+    )
+    assert len(shot_shell_paths) == 27
+    assert len(set(shot_shell_paths)) == 27
+    shot_shell_path = (
+        "common/stage/stage00/s00a10l/cache/00e1a168.mdn"
+    )
+    addon_module = importlib.import_module(f"{addon_key}.addon")
+    original_user_asset_names = addon_module.USER_ASSET_NAMES
+    original_registry = addon_module._asset_names(force=True)
+    original_shot_shell_name = original_registry.display_name(0x00E1A168)
+    try:
+        addon_module.USER_ASSET_NAMES = (
+            Path(temporary) / "test_asset_names.json"
+        )
+        addon_module._asset_name_registry = None
+        choose_result(shot_shell_path)
+        assert bpy.ops.mgs4.set_asset_name(
+            name="shared_shot_shell",
+            name_hash="00E1A168",
+        ) == {"FINISHED"}
+        shot_shell_items = tuple(
+            item
+            for item in settings.results
+            if item.virtual_path.lower().endswith("/00e1a168.mdn")
+        )
+        assert len(shot_shell_items) == 27
+        assert all(
+            item.resolved_name == "shared_shot_shell"
+            and item.name.startswith(
+                "shared_shot_shell  (00e1a168.mdn)"
+            )
+            and "shared_shot_shell" in item.searchable_names
+            for item in shot_shell_items
+        )
+    finally:
+        addon_module.USER_ASSET_NAMES = original_user_asset_names
+        addon_module._asset_name_registry = None
+        restored_registry = addon_module._asset_names(force=True)
+        addon_module._refresh_asset_name_labels(restored_registry)
+    assert all(
+        item.resolved_name == original_shot_shell_name
+        for item in settings.results
+        if item.virtual_path.lower().endswith("/00e1a168.mdn")
+    )
+    existing_objects = {
+        obj.as_pointer() for obj in bpy.data.objects
+    }
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    choose_result(shot_shell_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    shot_shell_objects = tuple(
+        obj
+        for obj in bpy.data.objects
+        if obj.as_pointer() not in existing_objects
+    )
+    assert len(shot_shell_objects) == 1
+    assert shot_shell_objects[0].type == "MESH"
+    assert len(shot_shell_objects[0].data.vertices) == 88
+    assert len(shot_shell_objects[0].data.polygons) == 78
+    shot_shell_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    )
+    assert len(shot_shell_materials) == 1
+    shot_shell_material = shot_shell_materials[0]
+    assert (
+        shot_shell_material["mgs4_name_hash"] & 0xFFFFFFFF
+        == 0x0079CCD3
+    )
+    assert shot_shell_material["mgs4_flags"] == 0x00100050
+    assert not shot_shell_material[
+        "mgs4_inferred_variant_50_vegetation"
+    ]
+    assert not shot_shell_material["mgs4_diffuse_alpha_enabled"]
+    assert shot_shell_material["mgs4_missing_texture_count"] == 0
+    shot_shell_nodes = {
+        node.get("mgs4_role"): (
+            node.get("mgs4_texture_hash") & 0xFFFFFFFF
+        )
+        for node in shot_shell_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeTexImage"
+    }
+    assert shot_shell_nodes == {
+        "diffuse": 0x00EEDCEF,
+        "normal": 0x00EF0696,
+        "specular": 0x008572F1,
+    }
+    shot_shell_principled = next(
+        node
+        for node in shot_shell_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    assert not shot_shell_principled.inputs["Alpha"].is_linked
+
     tree_path = "common/stage/slot/0000001e/cache/00f686ed.mdn"
     existing_materials = {
         material.as_pointer() for material in bpy.data.materials
@@ -230,6 +356,90 @@ with tempfile.TemporaryDirectory() as temporary:
         tree_alpha_link.from_node.get("mgs4_texture_hash") & 0xFFFFFFFF
         == 0x00DDEC65
     )
+
+    cwr_path = "common/stage/stage02/s02a30l/cache/00463172.mdn"
+    existing_objects = {
+        obj.as_pointer() for obj in bpy.data.objects
+    }
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    existing_collections = {
+        collection.as_pointer() for collection in bpy.data.collections
+    }
+    existing_actions = {
+        action.as_pointer() for action in bpy.data.actions
+    }
+    settings.import_materials = True
+    settings.import_animations = True
+    settings.animation_limit = 2
+    choose_result(cwr_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    cwr_objects = tuple(
+        obj
+        for obj in bpy.data.objects
+        if obj.as_pointer() not in existing_objects
+    )
+    assert len(cwr_objects) == 14
+    cwr_armature = next(obj for obj in cwr_objects if obj.type == "ARMATURE")
+    assert len([obj for obj in cwr_objects if obj.type == "MESH"]) == 13
+    cwr_actions = tuple(
+        action
+        for action in bpy.data.actions
+        if action.as_pointer() not in existing_actions
+    )
+    assert {action.name for action in cwr_actions} == {
+        "00489370_0000_00BA6B31",
+        "00489370_0001_00239F39",
+    }
+    object_count = len(bpy.data.objects)
+    mesh_count = len(bpy.data.meshes)
+    for action in cwr_actions:
+        cwr_armature.animation_data.action = action
+        cwr_armature.animation_data.action_slot = action.slots[0]
+        bpy.context.scene.frame_set(round(action.frame_start))
+        assert len(bpy.data.objects) == object_count
+        assert len(bpy.data.meshes) == mesh_count
+
+    cwr_materials = {
+        material["mgs4_name_hash"] & 0xFFFFFFFF: material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    }
+    assert len(cwr_materials) == 8
+    for material_hash in (
+        0x00D00A31,
+        0x00890BE2,
+        0x00963DDE,
+        0x005D4363,
+        0x00A8ACBB,
+    ):
+        material = cwr_materials[material_hash]
+        assert material["mgs4_diffuse_alpha_enabled"]
+        assert material["mgs4_diffuse_alpha_mode"] == "BLENDED"
+        assert material.surface_render_method == "BLENDED"
+    assert cwr_materials[0x00890BE2]["mgs4_variant_e1_tint"]
+    assert tuple(
+        cwr_materials[0x00890BE2]["mgs4_variant_e1_tint_color"]
+    ) == (1.0, 0.0, 0.0)
+
+    cwr_groups = {
+        collection["mgs4_group_index"]: collection
+        for collection in bpy.data.collections
+        if collection.as_pointer() not in existing_collections
+        and collection.get("mgs4_group_index") is not None
+    }
+    assert {
+        index
+        for index, collection in cwr_groups.items()
+        if collection["mgs4_default_hidden"]
+    } == {8, 10}
+    assert all(
+        cwr_groups[index].hide_viewport
+        and cwr_groups[index].hide_render
+        for index in (8, 10)
+    )
+    settings.import_animations = False
 
     glasses_path = "common/stage/stage05/s20a00l/cache/0033f269.mdn"
     existing_materials = {
@@ -501,7 +711,11 @@ with tempfile.TemporaryDirectory() as temporary:
     meshes = [
         obj
         for obj in bpy.data.objects
-        if obj.type == "MESH" and obj.parent == armature
+        if (
+            obj.type == "MESH"
+            and obj.parent == armature
+            and obj.visible_get()
+        )
     ]
     depsgraph = bpy.context.evaluated_depsgraph_get()
     for frame in (1, 60, 120):

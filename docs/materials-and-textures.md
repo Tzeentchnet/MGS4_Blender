@@ -172,6 +172,13 @@ signature occurs 15 times, covering five distinct texture sets; all five put
 the complete presentation color in slot 2. This includes the handprint and
 signature materials in `00B267E5`.
 
+The three-texture `0x00100050` material on `00E1A168` (`shot_shell_cm`) uses
+the ordinary `diffuse`, `normal`, `specular` order instead. Its diffuse
+`00EEDCEF` is opaque DXT1 and contains the dark red and black shell colors;
+that appearance is authored texture data, not a missing-texture fallback. Its
+mesh has no alpha render-state bit and does not match the spatial vegetation
+signature, so the material remains opaque.
+
 ## Principled material conversion
 
 Every MDN material becomes a new Blender material named
@@ -292,6 +299,14 @@ non-metallic.
   `00846B09_Mesh_009`, its paired mesh 10, and `00846B09_Mesh_022`.
   Transparency overlap is disabled for these overlays, and DXT1 counterparts
   remain opaque.
+- Single-texture variants `0xE0` and `0xE1` use alpha-capable diffuse sources
+  as blended effect opacity. A corpus scan found 1,025 material entries using
+  these variants, with 266 unique textures: all 207 DXT5 sources contain
+  nontrivial alpha, while the 59 DXT1 sources remain opaque. Variant `0xE1`
+  also multiplies texture RGB by material parameter 0 RGB. Repeated reuse of
+  identical masks with red, orange, green, and neutral parameters confirms
+  this tint role. This restores the lights, glass, markings, and graded
+  overlays on models such as `cwr_hel_def` (`00463172`).
 - Opacity color connects to Alpha and enables blended rendering.
 - Specular color is multiplied by the converted specular level before
   connecting to Specular IOR Level.
@@ -430,6 +445,8 @@ unsigned value is required.
 | Material | `mgs4_variant_a5_translucency` | Fractional variant-`0xA5` material-parameter opacity is active |
 | Material | `mgs4_variant_a5_opacity` | Constant opacity read from variant-`0xA5` parameter 2 W |
 | Material | `mgs4_variant_a5_roughness` | Principled roughness read from variant-`0xA5` parameter 3 W |
+| Material | `mgs4_variant_e1_tint` | Variant-`0xE1` parameter-0 RGB tint is active |
+| Material | `mgs4_variant_e1_tint_color` | RGB tint read from variant-`0xE1` parameter 0 |
 | Material | `mgs4_missing_texture_count` | Number of unresolved texture slots |
 | Image | `mgs4_texture_hash` | Source texture hash |
 | Image | `mgs4_interpretation` | `COLOR` or `DATA` |

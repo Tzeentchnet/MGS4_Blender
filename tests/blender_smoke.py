@@ -33,7 +33,10 @@ from mgs4_remastered_importer.blender_import import (  # noqa: E402
 )
 from mgs4_remastered_importer.catalog import GameCatalog, MODEL  # noqa: E402
 from mgs4_remastered_importer.errors import MGS4Error  # noqa: E402
-from mgs4_remastered_importer.formats.common import hash_name  # noqa: E402
+from mgs4_remastered_importer.formats.common import (  # noqa: E402
+    hash_name,
+    strcode,
+)
 from mgs4_remastered_importer.formats.mdn import (  # noqa: E402
     MdnMaterial,
     parse_mdn,
@@ -138,10 +141,16 @@ with tempfile.TemporaryDirectory() as temporary:
         node.inputs["Roughness"].default_value >= 0.45
         for node in principled_nodes
     )
-    assert all(
-        not node.inputs["Alpha"].is_linked
-        for node in principled_nodes
-    )
+    alpha_linked_materials = {
+        material["mgs4_name_hash"] & 0xFFFFFFFF
+        for material in bpy.data.materials
+        if next(
+            node
+            for node in material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        ).inputs["Alpha"].is_linked
+    }
+    assert alpha_linked_materials == {0x00890BE2}
     normal_nodes = [
         node
         for material in bpy.data.materials
@@ -484,6 +493,140 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     assert tree_alpha_link.from_socket.name == "Alpha"
 
+    cwr_model = parse_mdn(
+        archive.fetch(
+            "common/stage/stage01/s01a00l/cache/00463172.mdn"
+        )
+    )
+    assert len(cwr_model.bones) == 6
+    assert len(cwr_model.groups) == 11
+    assert len(cwr_model.meshes) == 13
+    assert len(cwr_model.materials) == 8
+    assert cwr_model.groups[8].flags == 0x0000000F
+    assert cwr_model.groups[9].flags == 0
+    assert cwr_model.groups[10].flags == 0x0000000F
+    assert cwr_model.meshes[9].vertices == cwr_model.meshes[10].vertices
+    assert cwr_model.meshes[9].vertices == cwr_model.meshes[11].vertices
+    cwr_existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    cwr_existing_collections = {
+        collection.as_pointer() for collection in bpy.data.collections
+    }
+    cwr_import = import_mdn_model(
+        bpy.context,
+        cwr_model,
+        name="cwr_hel_def",
+        resolver=resolver,
+    )
+    assert not cwr_import.warnings
+    cwr_materials = {
+        material["mgs4_name_hash"] & 0xFFFFFFFF: material
+        for material in bpy.data.materials
+        if material.as_pointer() not in cwr_existing_materials
+    }
+    assert len(cwr_materials) == 8
+    expected_effects = {
+        0x00D00A31: (0xE0, 0x00B1F871, None),
+        0x00890BE2: (0xE1, 0x00D3BE7B, (1.0, 0.0, 0.0)),
+        0x00963DDE: (0xE0, 0x00C6E1DB, None),
+        0x005D4363: (
+            0xE1,
+            0x00E34BA9,
+            (0.677734, 1.0, 0.768555),
+        ),
+        0x00A8ACBB: (0xE0, 0x0083C685, None),
+    }
+    for material_hash, (
+        variant,
+        texture_hash,
+        tint_color,
+    ) in expected_effects.items():
+        imported_material = cwr_materials[material_hash]
+        assert imported_material["mgs4_flags"] & 0xFF == variant
+        assert imported_material["mgs4_diffuse_alpha_enabled"]
+        assert imported_material["mgs4_diffuse_alpha_mode"] == "BLENDED"
+        assert imported_material.surface_render_method == "BLENDED"
+        assert not imported_material.use_transparency_overlap
+        principled = next(
+            node
+            for node in imported_material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        )
+        alpha_link = principled.inputs["Alpha"].links[0]
+        assert alpha_link.from_node.get("mgs4_role") == "diffuse"
+        assert (
+            alpha_link.from_node.get("mgs4_texture_hash") & 0xFFFFFFFF
+            == texture_hash
+        )
+        assert imported_material["mgs4_variant_e1_tint"] == (
+            tint_color is not None
+        )
+        if tint_color is not None:
+            assert all(
+                abs(actual - expected) < 1e-6
+                for actual, expected in zip(
+                    imported_material["mgs4_variant_e1_tint_color"],
+                    tint_color,
+                )
+            )
+            tint_link = principled.inputs["Base Color"].links[0]
+            assert (
+                tint_link.from_node.get("mgs4_role")
+                == "material_tint"
+            )
+            assert all(
+                abs(actual - expected) < 1e-6
+                for actual, expected in zip(
+                    tint_link.from_node.inputs[2].default_value[:3],
+                    tint_color,
+                )
+            )
+
+    cwr_groups = {
+        collection["mgs4_group_index"]: collection
+        for collection in bpy.data.collections
+        if collection.as_pointer() not in cwr_existing_collections
+        and collection.get("mgs4_group_index") is not None
+    }
+    assert len(cwr_groups) == 11
+    assert {
+        index
+        for index, collection in cwr_groups.items()
+        if collection["mgs4_default_hidden"]
+    } == {8, 10}
+    for index in (8, 10):
+        assert cwr_groups[index].hide_viewport
+        assert cwr_groups[index].hide_render
+    assert not cwr_groups[9].hide_viewport
+    assert not cwr_groups[9].hide_render
+
+    cwr_motion = parse_mtar(
+        archive.fetch(
+            "common/stage/stage01/s01a10l/cache/00489370.mtar"
+        )
+    )
+    object_count = len(bpy.data.objects)
+    mesh_count = len(bpy.data.meshes)
+    cwr_motion_import = import_motion_archive(
+        bpy.context,
+        cwr_import.armature,
+        cwr_motion,
+        archive_name="00489370.mtar",
+    )
+    assert {action.name for action in cwr_motion_import.actions} == {
+        "00489370_0000_00BA6B31",
+        "00489370_0001_00239F39",
+    }
+    assert len(bpy.data.objects) == object_count
+    assert len(bpy.data.meshes) == mesh_count
+    for action in cwr_motion_import.actions:
+        cwr_import.armature.animation_data.action = action
+        cwr_import.armature.animation_data.action_slot = action.slots[0]
+        bpy.context.scene.frame_set(round(action.frame_start))
+        assert len(bpy.data.objects) == object_count
+        assert len(bpy.data.meshes) == mesh_count
+
     stage_geometry_model = parse_mdn(
         (
             data_root
@@ -780,6 +923,106 @@ with tempfile.TemporaryDirectory() as temporary:
         if node.bl_idname == "ShaderNodeBsdfPrincipled"
     )
     assert not planar_variant_50_principled.inputs["Alpha"].is_linked
+
+    shot_shell_paths = (
+        "common/stage/stage00/s00a10l/cache/00e1a168.mdn",
+        "common/stage/stage01/s01a00l/cache/00e1a168.mdn",
+    )
+    shot_shell_payloads = tuple(
+        archive.fetch(path) for path in shot_shell_paths
+    )
+    assert shot_shell_payloads[0][8:] == shot_shell_payloads[1][8:]
+    shot_shell_models = tuple(
+        parse_mdn(payload) for payload in shot_shell_payloads
+    )
+    assert (
+        shot_shell_models[0].header.filename_hash
+        == 0x00E1A168
+    )
+    assert (
+        shot_shell_models[1].header.filename_hash
+        == strcode("s01a00l")
+    )
+    assert replace(
+        shot_shell_models[0],
+        header=replace(
+            shot_shell_models[0].header,
+            filename_hash=0,
+        ),
+    ) == replace(
+        shot_shell_models[1],
+        header=replace(
+            shot_shell_models[1].header,
+            filename_hash=0,
+        ),
+    )
+    shot_shell_model = shot_shell_models[0]
+    assert len(shot_shell_model.meshes) == 1
+    assert shot_shell_model.meshes[0].info.flags == 0x80000000
+    assert len(shot_shell_model.materials) == 1
+    shot_shell_source = shot_shell_model.materials[0]
+    assert shot_shell_source.name_hash == 0x0079CCD3
+    assert shot_shell_source.flags == 0x00100050
+    assert _texture_roles(shot_shell_source) == (
+        "diffuse",
+        "normal",
+        "specular",
+    )
+    shot_shell_texture_hashes = tuple(
+        shot_shell_model.textures[index].name_hash
+        for index in shot_shell_source.texture_indices[
+            : shot_shell_source.texture_count
+        ]
+    )
+    assert shot_shell_texture_hashes == (
+        0x00EEDCEF,
+        0x00EF0696,
+        0x008572F1,
+    )
+    assert tuple(
+        resolver.resolve(texture_hash, "common").format
+        for texture_hash in shot_shell_texture_hashes
+    ) == (FORMAT_DXT1, FORMAT_DXT5, FORMAT_DXT1)
+    shot_shell_existing = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    shot_shell_import = import_mdn_model(
+        bpy.context,
+        shot_shell_model,
+        name="MGS4_SHOT_SHELL",
+        resolver=resolver,
+    )
+    assert not shot_shell_import.warnings
+    shot_shell_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in shot_shell_existing
+    )
+    assert len(shot_shell_materials) == 1
+    shot_shell_material = shot_shell_materials[0]
+    assert not shot_shell_material[
+        "mgs4_inferred_variant_50_vegetation"
+    ]
+    assert not shot_shell_material["mgs4_diffuse_alpha_enabled"]
+    assert shot_shell_material["mgs4_missing_texture_count"] == 0
+    shot_shell_nodes = {
+        node.get("mgs4_role"): (
+            node.get("mgs4_texture_hash") & 0xFFFFFFFF
+        )
+        for node in shot_shell_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeTexImage"
+    }
+    assert shot_shell_nodes == {
+        "diffuse": 0x00EEDCEF,
+        "normal": 0x00EF0696,
+        "specular": 0x008572F1,
+    }
+    shot_shell_principled = next(
+        node
+        for node in shot_shell_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    assert not shot_shell_principled.inputs["Alpha"].is_linked
 
     ww_archive = VpakArchive(
         data_root / "ww" / "stage" / "stage_data_compressed.1.pak"

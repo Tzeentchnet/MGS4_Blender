@@ -19,6 +19,7 @@ from mgs4_remastered_importer.catalog import (
     STAGE,
     AssetRecord,
     GameCatalog,
+    first_model_occurrences,
     infer_auxiliary_stage_models,
     infer_exterior_stage_models,
     select_default_motion,
@@ -336,6 +337,33 @@ class MotionSelectionTests(unittest.TestCase):
         self.assertIsNone(selected)
 
 
+class CatalogFilterTests(unittest.TestCase):
+    def test_first_model_occurrences_preserve_catalog_order(self):
+        first = AssetRecord(
+            MODEL,
+            "common/stage/stage00/s00a10l/cache/00e1a168.mdn",
+            None,
+            3_440,
+        )
+        duplicate = AssetRecord(
+            MODEL,
+            "common/stage/stage01/s01a00l/cache/00e1a168.mdn",
+            None,
+            3_440,
+        )
+        other = AssetRecord(
+            MODEL,
+            "common/stage/stage01/s01a00l/cache/00463172.mdn",
+            None,
+            21_280,
+        )
+
+        self.assertEqual(
+            first_model_occurrences((first, duplicate, other)),
+            (first, other),
+        )
+
+
 @unittest.skipUnless(STAGE_PAK.is_file(), "MGS4 installation is not available")
 class InstalledAssetTests(unittest.TestCase):
     @classmethod
@@ -367,6 +395,29 @@ class InstalledAssetTests(unittest.TestCase):
             motion_asset.virtual_path,
             "common/stage/stage03/s03a35l/cache/0084802f.mtar",
         )
+
+    def test_catalog_falls_back_to_reused_model_motion(self):
+        catalog = GameCatalog(INSTALL_ROOT)
+        for virtual_path in (
+            "common/stage/stage02/s02a30l/cache/00463172.mdn",
+            "common/stage/stage03/s03a15l/cache/00463172.mdn",
+            "ww/stage/slot/0000301e/cache/00463172.mdn",
+        ):
+            model_asset = next(
+                asset
+                for asset in catalog.search(MODEL, "00463172.mdn", limit=0)
+                if asset.virtual_path == virtual_path
+            )
+            model = parse_mdn(catalog.read(model_asset))
+            motion_asset = catalog.default_motion_for_model(
+                model_asset,
+                tuple(bone.name_hash for bone in model.bones),
+            )
+            self.assertIsNotNone(motion_asset)
+            self.assertEqual(
+                motion_asset.virtual_path,
+                "common/stage/stage01/s01a10l/cache/00489370.mtar",
+            )
 
     def test_catalog_resolves_inferred_lod_chain_from_any_member(self):
         catalog = GameCatalog(INSTALL_ROOT)

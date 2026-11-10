@@ -303,6 +303,21 @@ def _variant_a5_translucency(
     return opacity, max(0.0, min(1.0, roughness))
 
 
+def _variant_e1_tint(
+    material: MdnMaterial,
+) -> tuple[float, float, float] | None:
+    if (
+        material.flags & 0xFF != 0xE1
+        or material.texture_count != 1
+        or not material.parameters
+    ):
+        return None
+    color = material.parameters[0][:3]
+    if not all(math.isfinite(component) for component in color):
+        return None
+    return tuple(max(0.0, min(1.0, component)) for component in color)
+
+
 def _uses_diffuse_alpha(
     material: MdnMaterial,
     texture_source: TextureSource,
@@ -341,6 +356,8 @@ def _diffuse_alpha_mode(
     if inferred_tree_mask or variant_50_vegetation or inferred_hair_mask:
         return _DIFFUSE_ALPHA_MASKED
     if inferred_scripted_overlay:
+        return _DIFFUSE_ALPHA_BLENDED
+    if shader in {0xE0, 0xE1} and material.texture_count == 1:
         return _DIFFUSE_ALPHA_BLENDED
     if material.flags == 0x00100010 and material.texture_count == 1:
         return _DIFFUSE_ALPHA_BLENDED
@@ -902,6 +919,7 @@ def _connect_material_presentation(
     options: MaterialImportOptions,
     vertex_support: _MaterialVertexColorSupport,
     inferred_detail_decal: bool,
+    variant_e1_tint: tuple[float, float, float] | None,
 ) -> None:
     nodes = material.node_tree.nodes
     links = material.node_tree.links
@@ -912,14 +930,34 @@ def _connect_material_presentation(
     vertex_node = None
     presentation_frame = None
 
-    if use_vertex_color or use_vertex_alpha:
+    if (
+        use_vertex_color
+        or use_vertex_alpha
+        or variant_e1_tint is not None
+    ):
         presentation_frame = nodes.new("NodeFrame")
-        presentation_frame.name = "MGS4_Vertex_Color_Presentation"
-        presentation_frame.label = "MGS4 Vertex Color Presentation"
+        presentation_frame.name = "MGS4_Material_Presentation"
+        presentation_frame.label = "MGS4 Material Presentation"
         presentation_frame.location = (-250.0, -500.0)
         presentation_frame.use_custom_color = True
         presentation_frame.color = (0.18, 0.34, 0.16)
 
+    base_color_output = texture_outputs.base_color
+    if variant_e1_tint is not None and base_color_output is not None:
+        tint = nodes.new("ShaderNodeMixRGB")
+        tint.name = "MGS4_Variant_E1_Tint"
+        tint.label = "Variant E1 Texture x Parameter Tint"
+        tint.blend_type = "MULTIPLY"
+        tint.inputs[0].default_value = 1.0
+        tint.inputs[2].default_value = (*variant_e1_tint, 1.0)
+        tint.parent = presentation_frame
+        tint.location = (0.0, 180.0)
+        tint["mgs4_role"] = "material_tint"
+        tint["mgs4_parameter"] = "parameter_0_rgb"
+        links.new(base_color_output, tint.inputs[1])
+        base_color_output = tint.outputs["Color"]
+
+    if use_vertex_color or use_vertex_alpha:
         vertex_node = nodes.new("ShaderNodeVertexColor")
         vertex_node.name = "MGS4_Vertex_Color"
         vertex_node.label = "MGS4 Vertex Color"
@@ -935,14 +973,14 @@ def _connect_material_presentation(
         multiply.inputs[0].default_value = 1.0
         multiply.parent = presentation_frame
         multiply.location = (220.0, 0.0)
-        if texture_outputs.base_color is not None:
-            links.new(texture_outputs.base_color, multiply.inputs[1])
+        if base_color_output is not None:
+            links.new(base_color_output, multiply.inputs[1])
         else:
             multiply.inputs[1].default_value = diffuse
         links.new(vertex_node.outputs["Color"], multiply.inputs[2])
         links.new(multiply.outputs["Color"], principled.inputs["Base Color"])
-    elif texture_outputs.base_color is not None:
-        links.new(texture_outputs.base_color, principled.inputs["Base Color"])
+    elif base_color_output is not None:
+        links.new(base_color_output, principled.inputs["Base Color"])
 
     alpha_output = texture_outputs.opacity
     if use_vertex_alpha and vertex_node is not None:
@@ -1031,6 +1069,7 @@ def _build_materials(
             _uses_variant_50_color_presentation(source)
         )
         variant_a5_translucency = _variant_a5_translucency(source)
+        variant_e1_tint = _variant_e1_tint(source)
         name = f"MGS4_MAT_{source.name_hash:08X}"
         material = bpy.data.materials.new(name)
         material.use_nodes = True
@@ -1061,6 +1100,9 @@ def _build_materials(
         material["mgs4_variant_a5_translucency"] = (
             variant_a5_translucency is not None
         )
+        material["mgs4_variant_e1_tint"] = variant_e1_tint is not None
+        if variant_e1_tint is not None:
+            material["mgs4_variant_e1_tint_color"] = variant_e1_tint
         if variant_a5_translucency is not None:
             material["mgs4_variant_a5_opacity"] = (
                 variant_a5_translucency[0]
@@ -1139,6 +1181,7 @@ def _build_materials(
             options,
             vertex_color_support[material_index],
             inferred_detail_decals[material_index],
+            variant_e1_tint,
         )
         materials.append(material)
     return tuple(materials)
@@ -1219,9 +1262,13 @@ def _create_group_collections(
         for group in model.groups
     ]
     for group_index, (group, collection) in enumerate(zip(model.groups, groups)):
+        default_hidden = group.flags == 0x0000000F
         collection["mgs4_group_index"] = group_index
         collection["mgs4_name_hash"] = uint32_to_int32(group.name_hash)
         collection["mgs4_flags"] = uint32_to_int32(group.flags)
+        collection["mgs4_default_hidden"] = default_hidden
+        collection.hide_viewport = default_hidden
+        collection.hide_render = default_hidden
         if 0 <= group.parent_index < len(groups) and group.parent_index != group_index:
             groups[group.parent_index].children.link(collection)
         else:

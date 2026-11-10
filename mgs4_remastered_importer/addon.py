@@ -39,6 +39,7 @@ from .catalog import (
     STAGE,
     AssetRecord,
     GameCatalog,
+    first_model_occurrences,
     infer_auxiliary_stage_models,
     infer_exterior_stage_models,
 )
@@ -101,6 +102,12 @@ def _hide_inferred_lod_updated(_preferences, context) -> None:
         _refresh_asset_results(context)
 
 
+def _hide_duplicate_entries_updated(_preferences, context) -> None:
+    scene = getattr(context, "scene", None)
+    if scene is not None and hasattr(scene, "mgs4_importer"):
+        _refresh_asset_results(context)
+
+
 def _search_text_updated(settings, _context) -> None:
     _select_first_matching_result(settings)
 
@@ -153,6 +160,15 @@ class MGS4ImporterPreferences(AddonPreferences):
         default=True,
         update=_hide_inferred_lod_updated,
     )
+    hide_duplicate_entries: BoolProperty(
+        name="Hide Duplicate Entries",
+        description=(
+            "Show only the first catalog occurrence of each model filename "
+            "hash in the Models asset list"
+        ),
+        default=True,
+        update=_hide_duplicate_entries_updated,
+    )
 
     def draw(self, _context):
         layout = self.layout
@@ -160,6 +176,7 @@ class MGS4ImporterPreferences(AddonPreferences):
         layout.prop(self, "cache_root")
         layout.prop(self, "highlight_missing_textures")
         layout.prop(self, "hide_inferred_lods")
+        layout.prop(self, "hide_duplicate_entries")
         layout.label(text="The importer never writes into the game installation.")
 
 
@@ -199,6 +216,9 @@ class MGS4SceneSettings(PropertyGroup):
     catalog_kind: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_names_version: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_hide_inferred_lods: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+    catalog_hide_duplicate_entries: BoolProperty(
+        options={"HIDDEN", "SKIP_SAVE"}
+    )
     catalog_error: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     scale: FloatProperty(
         name="Scale",
@@ -463,6 +483,8 @@ def _refresh_asset_results(
         and settings.catalog_names_version == BUNDLED_ASSET_NAMES_VERSION
         and settings.catalog_hide_inferred_lods
         == preferences.hide_inferred_lods
+        and settings.catalog_hide_duplicate_entries
+        == preferences.hide_duplicate_entries
     ):
         return len(settings.results), settings.catalog_error
 
@@ -471,6 +493,9 @@ def _refresh_asset_results(
     settings.catalog_kind = settings.asset_kind
     settings.catalog_names_version = ""
     settings.catalog_hide_inferred_lods = preferences.hide_inferred_lods
+    settings.catalog_hide_duplicate_entries = (
+        preferences.hide_duplicate_entries
+    )
     settings.catalog_error = ""
     try:
         names = _asset_names(force=force)
@@ -484,6 +509,8 @@ def _refresh_asset_results(
                 for asset in results
                 if not _asset_is_inferred_lod_lower(asset)
             )
+        if settings.asset_kind == MODEL and preferences.hide_duplicate_entries:
+            results = first_model_occurrences(results)
     except (OSError, MGS4Error) as exc:
         settings.catalog_error = str(exc)
         settings.result_index = 0
@@ -1530,6 +1557,8 @@ class MGS4_PT_importer(Panel):
             != BUNDLED_ASSET_NAMES_VERSION
             or settings.catalog_hide_inferred_lods
             != preferences.hide_inferred_lods
+            or settings.catalog_hide_duplicate_entries
+            != preferences.hide_duplicate_entries
         ):
             _schedule_asset_refresh(context.scene)
 

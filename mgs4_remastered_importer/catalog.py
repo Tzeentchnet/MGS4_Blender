@@ -59,6 +59,20 @@ class AssetRecord:
         return self.virtual_path
 
 
+def first_model_occurrences(
+    assets: Sequence[AssetRecord],
+) -> tuple[AssetRecord, ...]:
+    seen_hashes: set[int] = set()
+    first_occurrences = []
+    for asset in assets:
+        model_hash = strcode_from_name(asset.virtual_path)
+        if model_hash in seen_hashes:
+            continue
+        seen_hashes.add(model_hash)
+        first_occurrences.append(asset)
+    return tuple(first_occurrences)
+
+
 @dataclass(frozen=True, slots=True)
 class StageResources:
     models: tuple[AssetRecord, ...]
@@ -524,14 +538,29 @@ class GameCatalog:
             return local
 
         match = _STAGE_PATH.match(model_asset.virtual_path)
-        if match is None:
-            return None
-        chapter_key = (
-            match.group("region").lower(),
-            match.group("chapter").lower(),
-        )
+        if match is not None:
+            chapter_key = (
+                match.group("region").lower(),
+                match.group("chapter").lower(),
+            )
+            chapter = self._select_motion(
+                self._motions_by_chapter.get(chapter_key, ()),
+                model_bone_hashes,
+            )
+            if chapter is not None:
+                return chapter
+
+        model_hash = strcode_from_name(model_asset.virtual_path)
+        reused_candidates = {
+            motion.virtual_path.lower(): motion
+            for sibling in self._models_by_hash.get(model_hash, ())
+            for motion in self._motions_by_directory.get(
+                sibling.virtual_path.rsplit("/", 1)[0].lower(),
+                (),
+            )
+        }
         return self._select_motion(
-            self._motions_by_chapter.get(chapter_key, ()),
+            tuple(reused_candidates.values()),
             model_bone_hashes,
         )
 

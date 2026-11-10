@@ -22,6 +22,27 @@ Only common-region stage MDNs are used as direct stage geometry sources.
 Models referenced by scripts or manifests are resolved by their filename
 hash. Loose files can also be imported through Blender's File > Import menu.
 
+### Repeated stage-local copies
+
+The catalog preserves every path-specific archive record. A reusable model can
+therefore appear once in each stage cache that needs it, with the same filename
+hash and friendly name. The name dictionary only labels the hash; it does not
+create, clone, or merge catalog records.
+
+For example, `shot_shell_cm` hashes to `00E1A168` and has one bundled
+dictionary candidate, but the game contains 27 stage-local
+`00e1a168.mdn` records. Their geometry, material, texture, and skin data are
+identical. Only the MDN header's filename-hash field changes: the earliest copy
+contains `00E1A168`, while later copies contain their enclosing stage hash.
+These records are reusable copies, not inferred LOD levels.
+
+The add-on preference **Hide Duplicate Entries** defaults to enabled for the
+Models asset list. It keeps the first catalog occurrence of each model filename
+hash and hides later occurrences without removing them from the underlying
+catalog. Disable it to show every stage-local path. Friendly names are stored
+by filename hash, so bundled and custom aliases appear on every occurrence
+when the duplicates are visible.
+
 ## MDN header
 
 The header is 128 bytes and begins with `MDN `. Both big- and little-endian
@@ -139,9 +160,9 @@ evidence. Only the structurally validated chains are used by the UI; tentative
 structural-only candidates are not hidden or imported automatically.
 
 The add-on preference **Hide Inferred LOD** defaults to enabled. It removes all
-known lower members from the Models asset list, leaving every catalog
-occurrence of each highest-detail member visible. Disabling the preference
-restores the complete model list.
+known lower members from the Models asset list. Disabling the preference
+restores lower-detail hashes; **Hide Duplicate Entries** independently controls
+whether repeated paths for each remaining hash are shown.
 
 For direct installed-game Model imports, **Import Inferred LOD** defaults to
 disabled. When enabled:
@@ -183,6 +204,11 @@ The model creates one root collection named from the MDN filename.
 - Meshes are linked into their referenced group, or the model root when the
   group index is invalid.
 - The armature, when present, is linked directly to the model root.
+- Group collections with exact source flags `0x0000000F` are hidden from the
+  viewport and render by default but remain available for manual unhiding.
+  These groups store inactive scripted alternatives such as livery, equipment,
+  and damage-state meshes. In `cwr_hel_def` (`00463172`), groups 8 and 10
+  contain coincident alternate UV presentations while group 9 is the default.
 
 The MDN mesh position is retained as `mgs4_position`; it is not applied as a
 separate object transform.
@@ -210,6 +236,7 @@ unsigned value is required.
 | Group collection | `mgs4_group_index` | Source group index |
 | Group collection | `mgs4_name_hash` | Source group hash |
 | Group collection | `mgs4_flags` | Source group flags |
+| Group collection | `mgs4_default_hidden` | Exact `0x0F` inactive variant group is hidden by default |
 | Mesh object | `mgs4_mesh_index` | Source mesh index |
 | Mesh object | `mgs4_flags` | Source mesh flags |
 | Mesh object | `mgs4_group_index` | Source group index |

@@ -48,6 +48,10 @@ were added for the images.
   blended transparency, terrain-detail overlays combine texture and vertex
   alpha, and vegetation cards and dense tree-branch atlases use dithered masks
   with overlapping transparent layers preserved.
+- Single-texture effect variants `0xE0` and `0xE1` use graded diffuse alpha;
+  `0xE1` also multiplies texture color by its material-parameter tint.
+- Source model groups flagged `0x0F` are retained in hidden collections as
+  inactive scripted variants rather than displaying coincident meshes at once.
 - Provides conservative or first-layer material presentation, vertex-color
   RGB multiplication, and separately opt-in vertex alpha.
 - Imports `MTAR`/`MTCM` skeletal clips as Blender 5.2 layered Actions at 60 FPS.
@@ -66,7 +70,7 @@ were added for the images.
 
 ## Install
 
-1. Build or use `dist/mgs4_remastered_importer-1.2.1.zip`.
+1. Build or use `dist/mgs4_remastered_importer-1.3.0.zip`.
 2. In Blender 5.2, open **Edit > Preferences > Extensions**.
 3. Use the menu in the upper-right and choose **Install from Disk**.
 4. Select the ZIP and enable **MGS4 Remastered Importer**.
@@ -112,12 +116,24 @@ exported JSON dictionary; enable **Overwrite Existing Names** in the file
 browser when imported entries should replace current custom names. **Export
 Names** writes only the user's custom entries, making additions easy to share.
 
+### Duplicate model entries
+
+The add-on preference **Hide Duplicate Entries** is enabled by default. For
+Models, it retains the first catalog occurrence of each filename hash and
+hides later stage-local copies from the asset list. The underlying catalog and
+stage imports still retain every path-specific record. Disable the preference
+to inspect or import a particular level's copy.
+
+Bundled and custom names are attached to the filename hash rather than one
+catalog path. When duplicate entries are visible, every occurrence therefore
+shows and searches by the same alias.
+
 ### Inferred model LODs
 
 The add-on preference **Hide Inferred LOD** is enabled by default. For Models,
-it removes validated lower-detail variants from the asset list while retaining
-every occurrence of the highest-detail model. Disable the preference to inspect
-or import individual lower variants.
+it removes validated lower-detail variants from the asset list. Disable the
+preference to inspect or import individual lower variants. **Hide Duplicate
+Entries** is applied separately to the remaining model hashes.
 
 Direct Model imports expose **Import Inferred LOD**, which is disabled by
 default. Enabling it imports the complete validated chain from highest to
@@ -157,6 +173,10 @@ Model, Stage Area, and Mission imports expose three presentation controls:
   family-`0x05` variant-`0xA3` materials and state-qualified variant-`0x03`
   materials. State-qualified family-`0x05` variant-`0x60` materials use
   blended diffuse alpha for scripted blood and damage overlays.
+- One-texture variants `0xE0` and `0xE1` use blended diffuse alpha whenever
+  their source format carries alpha. Variant `0xE1` additionally applies
+  material parameter 0 RGB as a color tint, restoring lights and effects such
+  as those on `cwr_hel_def`.
 - Two-texture variant-`0xA5` reflective materials use fractional material
   parameter 2 W as blended opacity and parameter 3 W as roughness. This
   restores translucent glasses, visors, and vehicle windows whose diffuse
