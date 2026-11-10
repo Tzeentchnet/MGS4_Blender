@@ -14,6 +14,66 @@ Implementations:
 - Blender nodes:
   [`blender_import.py`](../mgs4_remastered_importer/blender_import.py)
 
+## Observed shader variants
+
+The installed PC asset corpus contains 48 distinct low-byte material/shader
+variants. These counts deduplicate repeated stage copies by model filename
+hash and file size: 4,068 parseable model variants contain 46,907 material
+table entries. The catalogued `00560E6D.mdn` is not an MDN and is excluded.
+**Model variants** is the number of distinct models containing at least one
+material with that shader variant.
+
+| Variant | Material entries | Model variants |
+| --- | ---: | ---: |
+| `0x00` | 22,968 | 1,335 |
+| `0x01` | 2,121 | 1,022 |
+| `0x02` | 1,540 | 266 |
+| `0x03` | 8,083 | 904 |
+| `0x04` | 494 | 148 |
+| `0x05` | 3,484 | 331 |
+| `0x06` | 757 | 92 |
+| `0x07` | 8 | 3 |
+| `0x0A` | 1,057 | 139 |
+| `0x0C` | 801 | 102 |
+| `0x0D` | 291 | 26 |
+| `0x10` | 539 | 362 |
+| `0x13` | 88 | 42 |
+| `0x14` | 7 | 7 |
+| `0x20` | 3 | 3 |
+| `0x21` | 2 | 2 |
+| `0x24` | 9 | 6 |
+| `0x2A` | 12 | 3 |
+| `0x30` | 416 | 216 |
+| `0x31` | 33 | 25 |
+| `0x32` | 1 | 1 |
+| `0x41` | 142 | 59 |
+| `0x50` | 1,312 | 922 |
+| `0x51` | 12 | 9 |
+| `0x52` | 294 | 96 |
+| `0x60` | 146 | 91 |
+| `0x61` | 251 | 174 |
+| `0x62` | 2 | 2 |
+| `0x64` | 8 | 4 |
+| `0x66` | 1 | 1 |
+| `0x67` | 2 | 2 |
+| `0xA0` | 550 | 137 |
+| `0xA1` | 1 | 1 |
+| `0xA2` | 117 | 100 |
+| `0xA3` | 451 | 126 |
+| `0xA4` | 30 | 21 |
+| `0xA5` | 47 | 40 |
+| `0xA6` | 64 | 53 |
+| `0xA8` | 8 | 8 |
+| `0xAB` | 20 | 11 |
+| `0xE0` | 341 | 212 |
+| `0xE1` | 268 | 198 |
+| `0xF0` | 74 | 23 |
+| `0xF1` | 25 | 16 |
+| `0xF2` | 7 | 4 |
+| `0xF3` | 9 | 4 |
+| `0xF4` | 5 | 2 |
+| `0xF5` | 6 | 3 |
+
 ## MDN material record
 
 Each 112-byte material record contains:
@@ -27,8 +87,9 @@ Each 112-byte material record contains:
 | Texture indices | Eight `u32` indices into the MDN texture table |
 | Parameters | Eight vectors of four half floats |
 
-The first parameter is treated as diffuse color and alpha. The second is
-treated as legacy specular color plus shininess.
+The first parameter's RGB components are treated as diffuse color. Its fourth
+component is not used as opacity; opaque materials commonly store zero there.
+The second parameter is treated as legacy specular color plus shininess.
 
 Each 32-byte MDN texture record contains a texture hash, flags, U/V scale,
 U/V offset, and two currently unused words.
@@ -56,7 +117,8 @@ Most variants begin with:
 5. `environment` when bit 20 is set and the variant permits it
 
 Variant `0xA6` begins with `opacity` instead of `diffuse`. Variant `0x00` with
-both no-specular and environment flags uses `diffuse, unknown`.
+both no-specular and environment flags and two declared textures resolves to
+`diffuse, normal`.
 
 Normal is omitted for variants `0x30`, `0x31`, `0xA3`, `0xA5`, `0xA8`,
 `0xE0`, and `0xE1`.
@@ -102,6 +164,14 @@ The role list is padded with `unknown` or truncated to the material's declared
 texture count. Unknown and advanced roles remain visible as labeled nodes
 instead of being discarded.
 
+Exact four-texture `0x00000050` materials whose first parameter is
+`(3, 0, 0, 1)` use the observed slot order `secondary_color`, `normal`,
+`diffuse`, `specular_gradient`. Slot 2 supplies Base Color while slot 0
+remains available as an unconnected sRGB node. Across the model corpus this
+signature occurs 15 times, covering five distinct texture sets; all five put
+the complete presentation color in slot 2. This includes the handprint and
+signature materials in `00B267E5`.
+
 ## Principled material conversion
 
 Every MDN material becomes a new Blender material named
@@ -109,13 +179,17 @@ Every MDN material becomes a new Blender material named
 
 ### Diffuse
 
-Parameter zero becomes Base Color. Non-finite, effectively zero, or invalid
-values fall back to `(0.8, 0.8, 0.8, 1.0)`. Components are clamped to
-Blender's zero-to-one range.
+Parameter zero's RGB components become Base Color. Non-finite, effectively
+zero, or invalid values fall back to `(0.8, 0.8, 0.8)`. Components are
+clamped to Blender's zero-to-one range.
 
-The alpha value is assigned to the Principled input, but the material remains
-opaque unless an `opacity` texture role or the opt-in vertex-alpha setting
-enables blended rendering.
+The exact variant-`0x50` signature described above treats parameter zero as
+shader-specific control data instead. Its neutral fallback avoids presenting
+the `(3, 0, 0, 1)` control value as a red Blender material color.
+
+Principled Alpha remains `1.0` unless an `opacity` texture role, a recognized
+diffuse-alpha material, or enabled vertex alpha supplies an opacity link. The
+fourth legacy diffuse component is not a reliable opacity value.
 
 ### Specular and roughness
 
@@ -134,9 +208,9 @@ non-metallic.
 
 - Every resolved texture receives an Image Texture, UV Map, and Mapping node.
 - MDN scale and offset values drive the Mapping node.
-- `diffuse`, `layer`, and `environment` roles use sRGB Images. Normal,
-  specular, opacity, incidence, gradient, and unknown roles use Non-Color
-  Images.
+- `diffuse`, `layer`, `environment`, and `secondary_color` roles use sRGB
+  Images. Normal, specular, opacity, incidence, gradient, and unknown roles
+  use Non-Color Images.
 - Blender Images are keyed by region, texture hash, dimensions, and
   `COLOR`/`DATA` interpretation. If one game texture hash is used in both
   classes, the importer deliberately creates separate Image datablocks so
@@ -144,6 +218,80 @@ non-metallic.
 - Diffuse color connects to Base Color in Conservative mode. First Layer
   Preview substitutes the first inferred `layer` texture without guessing a
   mask or blend operation.
+- Two-texture variant `0x00` materials with bits 17 and 20 set use the diffuse
+  image alpha as opacity when its source format carries a full alpha channel
+  (`RGBA32`, `DXT3`, or `DXT5`). This covers bullet marks, grates, and similar
+  transparent surfaces without treating their DXT1 counterparts as
+  transparent. Materials used exclusively by mesh render-family `0x10`
+  additionally require render-state bit `0x00001000` on at least one user
+  mesh. Matching materials use dithered masks with transparency overlap
+  enabled for grass and similar cards. Without that mesh state, diffuse alpha
+  is treated as auxiliary packed data and the material remains opaque, as for
+  `MGS4_MAT_00F9864C` on `s01a33a_Mesh_045`. Other render families retain
+  blended rendering with transparency overlap disabled.
+- Single-texture materials with exact flags `0x00100010` use alpha-capable
+  diffuse sources as blended opacity by default. This signature covers grime,
+  drip, and smear decals such as `MGS4_MAT_001E4C5B`; DXT1 variants remain
+  opaque. The importer separately recognizes dense spatial tree geometry
+  within render-family `0x00`: a state-qualified material region with at least
+  512 triangles and a smallest-to-largest axis-span ratio of at least 40% uses
+  dithered opacity instead. Across all 536 occurrences of this material
+  signature, that rule selects only the six `s04a_tree_a[0-2]_loda[_t1]`
+  variants. It restores the authored branch masks in diffuse atlases
+  `00DDEC65` and `008D4334` while preserving blended decal behavior.
+- Four-texture materials with exact flags `0x00110000`, used exclusively by
+  mesh render-family `0x10`, use graded diffuse alpha as blended opacity when
+  the diffuse source supports alpha. This covers reflective vehicle glass
+  such as materials `004E2EE5` and `0048747B` in `00C3A92A`; their flat-gray
+  RGB is a base tint while alpha defines the window coverage. DXT1 variants
+  remain opaque. Environment texture nodes remain visible but conservatively
+  unconnected until their reflection mapping is understood.
+- Two-texture materials with exact flags `0x000000A5` use a shader-specific
+  constant presentation when parameter 2 W lies strictly between zero and
+  one. Parameter 2 W becomes blended opacity and parameter 3 W becomes
+  Principled roughness. This covers environment-reflective glass such as
+  `MGS4_MAT_00F31905` on `0033F269_Mesh_001`, where the white diffuse texture
+  is intentionally opaque and the material parameters instead specify
+  opacity `0.3999` and roughness `0.09998`. Corpus uses include glasses,
+  visors, champagne glass, and vehicle windows. Parameter 2 W boundary values
+  of zero and one remain unchanged because those occurrences represent
+  distinct fully reflective or opaque presentations. The environment node
+  remains available but unconnected until its reflection mapping is known.
+- Two- or three-texture materials with flags `0x00120000` or `0x00120002`
+  are inferred as terrain-detail decals when all of their mesh users belong
+  to render-family `0x15` and their geometry contains a vertex-alpha boundary
+  fade. These materials use blended rendering with transparency overlap
+  disabled. Vertex alpha is connected automatically even when the general
+  **Vertex Color Alpha** option is off. An alpha-capable diffuse texture is
+  multiplied by vertex alpha; DXT1 materials use vertex alpha alone.
+- Single-texture variant `0x30` materials with an alpha-capable source use the
+  diffuse image alpha as a vegetation-card mask. They use Blender's dithered
+  rendering with transparency overlap enabled so intersecting cards remain
+  visible.
+- Three-texture materials with exact flags `0x00100050` are also inferred as
+  vegetation masks when they are used exclusively by render-family `0x80`,
+  carry mesh render-state bit `0x00001000`, and their material geometry spans
+  at least 10% of its largest dimension on every axis. This spatial-card
+  signature selects plant clusters such as `0078B3B0` and `0078B3F0` while
+  excluding thin planar effects with the same material flags. Alpha-capable
+  diffuse sources use dithered masks with transparency overlap enabled.
+- Three-texture variant `0xA3` materials used exclusively by render-family
+  `0x05` use alpha-capable diffuse sources as dithered hair or fur masks. The
+  variant itself is the discriminator because verified hair can omit mesh
+  render-state bit `0x00001000`, as on `00846B09_Mesh_011`. DXT1 sources
+  remain opaque.
+- Four-texture variant `0x03` materials use the same dithered hair-mask
+  presentation only when they are exclusive to render-family `0x05` and at
+  least one user mesh carries render-state bit `0x00001000`. This covers the
+  low-range chest-hair alpha in `MGS4_MAT_009FDFB9` on
+  `00846B09_Mesh_012` without changing the many opaque variant-`0x03`
+  materials.
+- Five-texture variant `0x60` materials exclusive to render-family `0x05`
+  with render-state bit `0x00001000` use alpha-capable diffuse sources as
+  blended scripted-overlay opacity. This covers the graded blood textures on
+  `00846B09_Mesh_009`, its paired mesh 10, and `00846B09_Mesh_022`.
+  Transparency overlap is disabled for these overlays, and DXT1 counterparts
+  remain opaque.
 - Opacity color connects to Alpha and enables blended rendering.
 - Specular color is multiplied by the converted specular level before
   connecting to Specular IOR Level.
@@ -178,8 +326,10 @@ connected directly instead of being multiplied to black.
 
 **Vertex Color Alpha** is independent and disabled by default. When enabled,
 it drives Alpha, multiplying an existing opacity texture when present, and
-enables blended rendering. RGB and alpha availability are evaluated
-independently, so disabling or rejecting RGB does not discard valid alpha.
+enables blended rendering. Inferred render-family `0x15` detail decals are the
+exception: their verified boundary-fade alpha is connected automatically.
+RGB and alpha availability are evaluated independently, so disabling or
+rejecting RGB does not discard valid alpha.
 
 ## Texture lookup
 
@@ -233,7 +383,14 @@ Materialized files use:
 
 Existing non-empty files are reused. New files are written to a
 process-specific temporary path and atomically replaced into the final
-location. The game archives remain unchanged.
+location.
+
+The cache root also contains `.mgs4-texture-sources-v1.json`, a versioned index
+of TXN texture hashes and their `TextureData.pak` blob paths. It avoids
+rescanning all TXN descriptors in each fresh Blender process. The index is
+rebuilt automatically when the configured game root changes or an index/data
+archive's size or modification time changes. The game archives remain
+unchanged.
 
 Loaded Blender Images use names shaped like:
 
@@ -246,6 +403,10 @@ Missing checker Images use
 
 ## Custom properties
 
+Unsigned 32-bit hashes and flags retain their source bit pattern in Blender's
+signed 32-bit integer representation. Use `value & 0xFFFFFFFF` when an
+unsigned value is required.
+
 | Owner | Property | Meaning |
 | --- | --- | --- |
 | Material | `mgs4_flags` | Complete MDN material flags |
@@ -254,8 +415,21 @@ Missing checker Images use
 | Material | `mgs4_layer_mode` | Conservative or first-layer presentation |
 | Material | `mgs4_vertex_color_available` | All users have meaningful vertex RGB |
 | Material | `mgs4_vertex_alpha_available` | All users have meaningful vertex alpha |
+| Material | `mgs4_inferred_detail_decal` | Material matched the detail-decal usage signature |
 | Material | `mgs4_vertex_color_enabled` | Vertex RGB is connected |
 | Material | `mgs4_vertex_alpha_enabled` | Vertex alpha is connected |
+| Material | `mgs4_diffuse_alpha_enabled` | Recognized diffuse alpha is connected to opacity |
+| Material | `mgs4_diffuse_alpha_mode` | `BLENDED`, `MASKED`, or `NONE` |
+| Material | `mgs4_alpha_render_state` | At least one user mesh carries render-state bit `0x00001000` |
+| Material | `mgs4_diffuse_alpha_suppressed` | Family-`0x10` packed diffuse alpha was kept opaque because the render-state bit is absent |
+| Material | `mgs4_inferred_tree_mask` | Exact variant-`0x10` dense spatial-tree signature matched |
+| Material | `mgs4_inferred_variant_50_vegetation` | Exact variant-`0x50` spatial-card vegetation signature matched |
+| Material | `mgs4_inferred_hair_mask` | Variant-`0xA3` or qualified variant-`0x03` character hair-mask signature matched |
+| Material | `mgs4_inferred_scripted_overlay` | Qualified variant-`0x60` scripted overlay uses blended diffuse alpha |
+| Material | `mgs4_variant_50_color_presentation` | Exact variant-`0x50` slot-2 color presentation is active |
+| Material | `mgs4_variant_a5_translucency` | Fractional variant-`0xA5` material-parameter opacity is active |
+| Material | `mgs4_variant_a5_opacity` | Constant opacity read from variant-`0xA5` parameter 2 W |
+| Material | `mgs4_variant_a5_roughness` | Principled roughness read from variant-`0xA5` parameter 3 W |
 | Material | `mgs4_missing_texture_count` | Number of unresolved texture slots |
 | Image | `mgs4_texture_hash` | Source texture hash |
 | Image | `mgs4_interpretation` | `COLOR` or `DATA` |

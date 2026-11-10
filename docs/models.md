@@ -131,6 +131,32 @@ The shared **Action Limit** controls how many clips are decoded and imported.
 Disable **Import Animations** for a model-only import. Stage, mission, and
 loose MDN imports do not automatically add Actions.
 
+## Inferred LOD chains
+
+The extension bundles model chains established from matching rig, group,
+material, texture, bounds, stage-co-occurrence, and geometry-reduction
+evidence. Only the structurally validated chains are used by the UI; tentative
+structural-only candidates are not hidden or imported automatically.
+
+The add-on preference **Hide Inferred LOD** defaults to enabled. It removes all
+known lower members from the Models asset list, leaving every catalog
+occurrence of each highest-detail member visible. Disabling the preference
+restores the complete model list.
+
+For direct installed-game Model imports, **Import Inferred LOD** defaults to
+disabled. When enabled:
+
+- Selecting any member resolves the complete chain and imports it from highest
+  to lowest detail.
+- Resolution prefers sibling assets in the selected model's virtual directory,
+  then falls back to the catalog's normal stage and loose-model preference.
+- Every level uses a separate root collection.
+- The highest-detail collection remains visible and is used for selection and
+  automatic animation matching.
+- Every lower-detail collection has viewport and render visibility disabled.
+
+Stage Area, Mission, and loose MDN imports do not use this option.
+
 ## Coordinate and attribute conversion
 
 Game coordinates are converted as:
@@ -163,12 +189,20 @@ separate object transform.
 
 ## Custom properties
 
+Unsigned 32-bit hashes and flags retain their source bit pattern in Blender's
+signed 32-bit integer representation. Use `value & 0xFFFFFFFF` when an
+unsigned value is required.
+
 | Owner | Property | Meaning |
 | --- | --- | --- |
 | Model collection | `mgs4_filename_hash` | MDN filename hash |
 | Model collection | `mgs4_scale` | Import scale |
 | Installed model collection | `mgs4_virtual_path` | Source archive path |
 | Loose model collection | `mgs4_source_file` | Source filesystem path |
+| Inferred LOD collection | `mgs4_inferred_lod` | Collection belongs to an imported inferred chain |
+| Inferred LOD collection | `mgs4_inferred_lod_level` | Zero-based detail level; zero is highest |
+| Inferred LOD collection | `mgs4_inferred_lod_count` | Number of imported levels in the chain |
+| Inferred LOD collection | `mgs4_inferred_lod_high_hash` | Filename hash of the highest-detail model |
 | Armature | `mgs4_filename_hash` | MDN filename hash |
 | Bone | `mgs4_bone_index` | Source bone index |
 | Bone | `mgs4_name_hash` | Source bone hash |

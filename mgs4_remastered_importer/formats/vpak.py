@@ -28,9 +28,15 @@ class VpakRecord:
 
 
 def decompress_lz4_block(source: bytes, expected_size: int | None = None) -> bytes:
-    output = bytearray()
+    if expected_size is not None and expected_size < 0:
+        raise FormatError(f"Invalid LZ4 output size {expected_size}")
+
+    output = bytearray(expected_size or 0)
+    output_view = memoryview(output) if expected_size is not None else None
+    output_position = 0
     position = 0
     source_size = len(source)
+    source_view = memoryview(source)
 
     while position < source_size:
         token = source[position]
@@ -50,11 +56,20 @@ def decompress_lz4_block(source: bytes, expected_size: int | None = None) -> byt
         literal_end = position + literal_length
         if literal_end > source_size:
             raise FormatError("LZ4 literal extends beyond the source block")
-        output.extend(source[position:literal_end])
+        next_output = output_position + literal_length
+        if expected_size is not None and next_output > expected_size:
+            raise FormatError("LZ4 output exceeds its declared size")
+        if output_view is None:
+            output[output_position:next_output] = source_view[
+                position:literal_end
+            ]
+        else:
+            output_view[output_position:next_output] = source_view[
+                position:literal_end
+            ]
+        output_position = next_output
         position = literal_end
 
-        if expected_size is not None and len(output) > expected_size:
-            raise FormatError("LZ4 output exceeds its declared size")
         if position == source_size:
             break
         if position + 2 > source_size:
@@ -62,7 +77,7 @@ def decompress_lz4_block(source: bytes, expected_size: int | None = None) -> byt
 
         match_offset = source[position] | (source[position + 1] << 8)
         position += 2
-        if match_offset == 0 or match_offset > len(output):
+        if match_offset == 0 or match_offset > output_position:
             raise FormatError(f"Invalid LZ4 match offset {match_offset}")
 
         match_length = token & 0x0F
@@ -77,15 +92,41 @@ def decompress_lz4_block(source: bytes, expected_size: int | None = None) -> byt
                     break
         match_length += 4
 
-        if expected_size is not None and len(output) + match_length > expected_size:
+        next_output = output_position + match_length
+        if expected_size is not None and next_output > expected_size:
             raise FormatError("LZ4 match exceeds its declared output size")
-        pattern = output[-match_offset:]
-        repeats = (match_length + match_offset - 1) // match_offset
-        output.extend((pattern * repeats)[:match_length])
+        if match_length <= match_offset:
+            match_start = output_position - match_offset
+            if output_view is None:
+                output[output_position:next_output] = output[
+                    match_start : match_start + match_length
+                ]
+            else:
+                output_view[output_position:next_output] = output_view[
+                    match_start : match_start + match_length
+                ]
+        else:
+            pattern = bytes(
+                output_view[
+                    output_position - match_offset : output_position
+                ]
+                if output_view is not None
+                else output[
+                    output_position - match_offset : output_position
+                ]
+            )
+            repeats = (match_length + match_offset - 1) // match_offset
+            repeated = (pattern * repeats)[:match_length]
+            if output_view is None:
+                output[output_position:next_output] = repeated
+            else:
+                output_view[output_position:next_output] = repeated
+        output_position = next_output
 
-    if expected_size is not None and len(output) != expected_size:
+    if expected_size is not None and output_position != expected_size:
         raise FormatError(
-            f"LZ4 size mismatch: expected {expected_size}, decoded {len(output)}"
+            f"LZ4 size mismatch: expected {expected_size}, "
+            f"decoded {output_position}"
         )
     return bytes(output)
 

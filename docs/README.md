@@ -28,14 +28,17 @@ container used by the catalog and texture resolver, plus the read-only legacy
 
 ## Shared conventions
 
-- Game identifiers are generally 24-bit or 32-bit hashes. Blender names and
-  custom properties display them as eight uppercase hexadecimal digits.
+- Game identifiers are generally 24-bit or 32-bit hashes. Blender names
+  display them as eight uppercase hexadecimal digits. Numeric custom
+  properties preserve unsigned 32-bit source values in Blender's signed
+  32-bit representation; use `value & 0xFFFFFFFF` to recover the unsigned
+  value.
 - Game vectors are converted from Y-up to Blender Z-up as
   `(x, y, z) -> (x, -z, y)`.
 - The default model and translation scale is `0.001`, converting the
   millimeter-scale source data to meters.
-- Installed-game imports are read-only. Converted images are written only to
-  the configured texture cache.
+- Installed-game imports are read-only. Converted images and the derived TXN
+  source index are written only to the configured texture cache.
 - Parsers validate table counts, offsets, sizes, references, and decompressed
   lengths before exposing data to Blender.
 - Unsupported or unresolved data is reported or retained as metadata rather

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from mgs4_remastered_importer.asset_names import (
     AssetNameError,
@@ -23,12 +24,19 @@ from mgs4_remastered_importer.catalog import (
     select_default_motion,
 )
 from mgs4_remastered_importer.errors import FormatError
+from mgs4_remastered_importer.formats.common import uint32_to_int32
 from mgs4_remastered_importer.formats.mdn import parse_mdn
 from mgs4_remastered_importer.formats.mtar import MotionArchive, parse_mtar
 from mgs4_remastered_importer.formats.texture import TextureResolver, _write_tga
 from mgs4_remastered_importer.formats.vpak import (
     VpakArchive,
     decompress_lz4_block,
+)
+from mgs4_remastered_importer.inferred_lods import (
+    inferred_lod_chain,
+    inferred_lod_chains,
+    inferred_lod_lower_hashes,
+    is_inferred_lod_lower,
 )
 
 
@@ -142,13 +150,103 @@ class AssetNameTests(unittest.TestCase):
                 load_user_names(path)
 
 
+class InferredLodTests(unittest.TestCase):
+    def test_validated_chains_are_loaded_highest_to_lowest(self):
+        chains = inferred_lod_chains()
+        self.assertEqual(len(chains), 105)
+        self.assertEqual(sum(len(chain) for chain in chains), 307)
+        self.assertEqual(sum(len(chain) == 3 for chain in chains), 97)
+        self.assertEqual(sum(len(chain) == 2 for chain in chains), 8)
+        self.assertIn(
+            (0x0051D172, 0x0051A3F7, 0x0051B7F4),
+            chains,
+        )
+
+    def test_every_member_resolves_to_its_complete_chain(self):
+        chain = (0x0051D172, 0x0051A3F7, 0x0051B7F4)
+        self.assertEqual(inferred_lod_chain(chain[0]), chain)
+        self.assertEqual(inferred_lod_chain(chain[1]), chain)
+        self.assertEqual(inferred_lod_chain(chain[2]), chain)
+        self.assertIsNone(inferred_lod_chain(0x00FFFFFF))
+
+    def test_only_lower_levels_are_hidden(self):
+        lower_hashes = inferred_lod_lower_hashes()
+        self.assertEqual(len(lower_hashes), 202)
+        self.assertNotIn(0x0051D172, lower_hashes)
+        self.assertTrue(is_inferred_lod_lower(0x0051A3F7))
+        self.assertTrue(is_inferred_lod_lower(0x0051B7F4))
+        self.assertFalse(is_inferred_lod_lower(0x0051D172))
+
+
+class CommonFormatTests(unittest.TestCase):
+    def test_uint32_to_int32_preserves_the_source_bit_pattern(self):
+        self.assertEqual(uint32_to_int32(0), 0)
+        self.assertEqual(uint32_to_int32(0x7FFFFFFF), 0x7FFFFFFF)
+        self.assertEqual(uint32_to_int32(0x80000000), -0x80000000)
+        self.assertEqual(uint32_to_int32(0xFFFFFFFF), -1)
+        self.assertEqual(uint32_to_int32(0x80000000) & 0xFFFFFFFF, 0x80000000)
+        with self.assertRaises(ValueError):
+            uint32_to_int32(-1)
+        with self.assertRaises(ValueError):
+            uint32_to_int32(0x100000000)
+
+
 class Lz4Tests(unittest.TestCase):
     def test_literal_block(self):
         self.assertEqual(decompress_lz4_block(b"\x50hello", 5), b"hello")
 
+    def test_literal_length_extension(self):
+        literal = b"abcdefghijklmnopqrst"
+        self.assertEqual(
+            decompress_lz4_block(b"\xf0\x05" + literal, len(literal)),
+            literal,
+        )
+
+    def test_non_overlapping_match(self):
+        block = b"\x80abcdWXYZ\x08\x00"
+        self.assertEqual(
+            decompress_lz4_block(block, 12),
+            b"abcdWXYZabcd",
+        )
+
     def test_overlapping_match(self):
         block = b"\x32abc\x03\x00"
         self.assertEqual(decompress_lz4_block(block, 9), b"abcabcabc")
+
+    def test_match_length_extension(self):
+        block = b"\x4fabcd\x04\x00\x01"
+        self.assertEqual(
+            decompress_lz4_block(block, 24),
+            b"abcd" * 6,
+        )
+
+    def test_decodes_without_declared_size(self):
+        block = b"\x32abc\x03\x00"
+        self.assertEqual(decompress_lz4_block(block), b"abcabcabc")
+
+    def test_rejects_truncated_literal(self):
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x20a")
+
+    def test_rejects_truncated_match_offset(self):
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x00\x01")
+
+    def test_rejects_invalid_match_offsets(self):
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x00\x00\x00")
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x00\x01\x00")
+
+    def test_enforces_declared_size(self):
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x50hello", 4)
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x50hello", 6)
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"\x10a\x01\x00", 4)
+        with self.assertRaises(FormatError):
+            decompress_lz4_block(b"", -1)
 
 
 class TextureConversionTests(unittest.TestCase):
@@ -250,6 +348,47 @@ class InstalledAssetTests(unittest.TestCase):
         self.assertGreater(len(catalog.search(MOTION, limit=0)), 200)
         self.assertGreater(len(catalog.search(STAGE, limit=0)), 60)
         self.assertGreater(len(catalog.search(MISSION, limit=0)), 5)
+
+    def test_catalog_falls_back_to_compatible_chapter_motion(self):
+        catalog = GameCatalog(INSTALL_ROOT)
+        model_asset = next(
+            asset
+            for asset in catalog.search(MODEL, "00aee46b.mdn", limit=0)
+            if asset.virtual_path
+            == "common/stage/stage03/s03a00l/cache/00aee46b.mdn"
+        )
+        model = parse_mdn(catalog.read(model_asset))
+        motion_asset = catalog.default_motion_for_model(
+            model_asset,
+            tuple(bone.name_hash for bone in model.bones),
+        )
+        self.assertIsNotNone(motion_asset)
+        self.assertEqual(
+            motion_asset.virtual_path,
+            "common/stage/stage03/s03a35l/cache/0084802f.mtar",
+        )
+
+    def test_catalog_resolves_inferred_lod_chain_from_any_member(self):
+        catalog = GameCatalog(INSTALL_ROOT)
+        selected = catalog.model_for_hash(
+            0x0051A3F7,
+            "common/stage/stage02/s02a40l",
+        )
+        self.assertIsNotNone(selected)
+        chain = catalog.inferred_lod_models(selected)
+        self.assertEqual(
+            tuple(Path(asset.virtual_path).stem for asset in chain),
+            ("0051d172", "0051a3f7", "0051b7f4"),
+        )
+        self.assertTrue(
+            all(
+                asset.virtual_path.startswith(
+                    "common/stage/stage02/s02a40l/"
+                )
+                for asset in chain
+            )
+        )
+        self.assertEqual(catalog.inferred_lod_models(chain[-1]), chain)
 
     def test_stage_layout_resolves_environment_and_auxiliary_models(self):
         catalog = GameCatalog(INSTALL_ROOT)
@@ -418,6 +557,17 @@ class InstalledAssetTests(unittest.TestCase):
             self.assertIn(path.suffix.lower(), {".dds", ".tga"})
             if path.suffix.lower() == ".dds":
                 self.assertEqual(path.read_bytes()[:4], b"DDS ")
+
+            cached_resolver = TextureResolver(DATA_ROOT, temporary)
+            with mock.patch.object(
+                cached_resolver,
+                "_scan_sources",
+                side_effect=AssertionError("source archives were rescanned"),
+            ):
+                self.assertEqual(
+                    cached_resolver.resolve(texture_hash),
+                    source,
+                )
 
 
 if __name__ == "__main__":

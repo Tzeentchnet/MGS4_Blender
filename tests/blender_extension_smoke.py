@@ -24,9 +24,11 @@ addon_key = next(
 preferences = bpy.context.preferences.addons[addon_key].preferences
 settings = bpy.context.scene.mgs4_importer
 assert preferences.highlight_missing_textures
+assert preferences.hide_inferred_lods
 assert settings.material_layer_mode == "CONSERVATIVE"
 assert settings.use_vertex_color
 assert not settings.use_vertex_alpha
+assert not settings.import_inferred_lods
 
 
 def choose_result(virtual_path: str) -> None:
@@ -62,8 +64,271 @@ with tempfile.TemporaryDirectory() as temporary:
     preferences.cache_root = temporary
     preferences.highlight_missing_textures = True
 
+    handprint_path = (
+        data_root / "common" / "mesh" / "pc" / "00b267e5.mdn"
+    )
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    assert bpy.ops.import_scene.mgs4_mdn(
+        filepath=str(handprint_path),
+        import_materials=True,
+    ) == {"FINISHED"}
+    handprint_materials = {
+        material["mgs4_name_hash"] & 0xFFFFFFFF: material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    }
+    assert len(handprint_materials) == 4
+    expected_handprint_diffuse = {
+        0x00EBB437: 0x00C3944E,
+        0x00A1E9BF: 0x0076315A,
+        0x007ACC3D: 0x0052A120,
+    }
+    for material_hash, texture_hash in expected_handprint_diffuse.items():
+        material = handprint_materials[material_hash]
+        assert material["mgs4_variant_50_color_presentation"]
+        assert all(
+            abs(component - expected) < 1e-6
+            for component, expected in zip(
+                material.diffuse_color,
+                (0.8, 0.8, 0.8, 1.0),
+            )
+        )
+        principled = next(
+            node
+            for node in material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        )
+        base_color_link = principled.inputs["Base Color"].links[0]
+        assert base_color_link.from_node.get("mgs4_role") == "diffuse"
+        assert (
+            base_color_link.from_node.get("mgs4_texture_hash")
+            & 0xFFFFFFFF
+            == texture_hash
+        )
+
     settings.asset_kind = "MODEL"
     assert len(settings.results) > 6_000
+    lod_paths = {
+        "common/stage/stage02/s02a40l/cache/0051d172.mdn",
+        "common/stage/stage02/s02a40l/cache/0051a3f7.mdn",
+        "common/stage/stage02/s02a40l/cache/0051b7f4.mdn",
+    }
+    visible_lod_paths = {
+        item.virtual_path
+        for item in settings.results
+        if item.virtual_path in lod_paths
+    }
+    assert visible_lod_paths == {
+        "common/stage/stage02/s02a40l/cache/0051d172.mdn"
+    }
+    visible_model_count = len(settings.results)
+    preferences.hide_inferred_lods = False
+    assert len(settings.results) > visible_model_count
+    assert {
+        item.virtual_path
+        for item in settings.results
+        if item.virtual_path in lod_paths
+    } == lod_paths
+    preferences.hide_inferred_lods = True
+    assert len(settings.results) == visible_model_count
+
+    variant_50_vegetation_path = (
+        "ww/stage/slot/00008d4d/cache/0078b3f0.mdn"
+    )
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    settings.import_materials = True
+    settings.import_animations = False
+    choose_result(variant_50_vegetation_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    variant_50_vegetation_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    )
+    assert len(variant_50_vegetation_materials) == 1
+    variant_50_vegetation_material = variant_50_vegetation_materials[0]
+    assert variant_50_vegetation_material[
+        "mgs4_inferred_variant_50_vegetation"
+    ]
+    assert variant_50_vegetation_material[
+        "mgs4_diffuse_alpha_mode"
+    ] == "MASKED"
+    assert (
+        variant_50_vegetation_material.surface_render_method
+        == "DITHERED"
+    )
+    variant_50_principled = next(
+        node
+        for node in variant_50_vegetation_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    variant_50_alpha_link = variant_50_principled.inputs["Alpha"].links[0]
+    assert variant_50_alpha_link.from_node.get("mgs4_role") == "diffuse"
+    assert (
+        variant_50_alpha_link.from_node.get("mgs4_texture_hash")
+        & 0xFFFFFFFF
+        == 0x00BE7D8F
+    )
+
+    planar_variant_50_path = (
+        "common/stage/slot/00000001/cache/0094b09f.mdn"
+    )
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    choose_result(planar_variant_50_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    planar_variant_50_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    )
+    assert len(planar_variant_50_materials) == 1
+    planar_variant_50_material = planar_variant_50_materials[0]
+    assert not planar_variant_50_material[
+        "mgs4_inferred_variant_50_vegetation"
+    ]
+    assert not planar_variant_50_material["mgs4_diffuse_alpha_enabled"]
+    planar_variant_50_principled = next(
+        node
+        for node in planar_variant_50_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    assert not planar_variant_50_principled.inputs["Alpha"].is_linked
+
+    tree_path = "common/stage/slot/0000001e/cache/00f686ed.mdn"
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    choose_result(tree_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    tree_materials = tuple(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+    )
+    assert len(tree_materials) == 1
+    tree_material = tree_materials[0]
+    assert tree_material["mgs4_name_hash"] & 0xFFFFFFFF == 0x003A99E2
+    assert tree_material["mgs4_inferred_tree_mask"]
+    assert tree_material["mgs4_diffuse_alpha_enabled"]
+    assert tree_material["mgs4_diffuse_alpha_mode"] == "MASKED"
+    assert tree_material.surface_render_method == "DITHERED"
+    assert tree_material.use_transparency_overlap
+    tree_principled = next(
+        node
+        for node in tree_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    tree_alpha_link = tree_principled.inputs["Alpha"].links[0]
+    assert tree_alpha_link.from_node.get("mgs4_role") == "diffuse"
+    assert (
+        tree_alpha_link.from_node.get("mgs4_texture_hash") & 0xFFFFFFFF
+        == 0x00DDEC65
+    )
+
+    glasses_path = "common/stage/stage05/s20a00l/cache/0033f269.mdn"
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    choose_result(glasses_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    glasses_material = next(
+        material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+        and material.get("mgs4_name_hash") is not None
+        and material["mgs4_name_hash"] & 0xFFFFFFFF == 0x00F31905
+    )
+    assert glasses_material["mgs4_variant_a5_translucency"]
+    assert (
+        abs(
+            glasses_material["mgs4_variant_a5_opacity"]
+            - 0.39990234375
+        )
+        < 1e-8
+    )
+    assert (
+        abs(
+            glasses_material["mgs4_variant_a5_roughness"]
+            - 0.0999755859375
+        )
+        < 1e-8
+    )
+    assert glasses_material.surface_render_method == "BLENDED"
+    assert not glasses_material.use_transparency_overlap
+    glasses_principled = next(
+        node
+        for node in glasses_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    glasses_alpha_link = glasses_principled.inputs["Alpha"].links[0]
+    assert glasses_alpha_link.from_node.bl_idname == "ShaderNodeValue"
+    assert glasses_alpha_link.from_node.get("mgs4_role") == "opacity"
+    assert (
+        glasses_alpha_link.from_node.get("mgs4_parameter")
+        == "parameter_2_w"
+    )
+    assert abs(
+        glasses_alpha_link.from_socket.default_value - 0.39990234375
+    ) < 1e-8
+
+    hair_blood_path = (
+        "common/stage/stage05/s05a50l/cache/00846b09.mdn"
+    )
+    existing_materials = {
+        material.as_pointer() for material in bpy.data.materials
+    }
+    choose_result(hair_blood_path)
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    hair_blood_materials = {
+        material["mgs4_name_hash"] & 0xFFFFFFFF: material
+        for material in bpy.data.materials
+        if material.as_pointer() not in existing_materials
+        and material.get("mgs4_name_hash") is not None
+    }
+    expected_hair_blood = {
+        0x006FF975: ("MASKED", 0x0028E963, True),
+        0x009FDFB9: ("MASKED", 0x00D42573, True),
+        0x00EDE4E4: ("BLENDED", 0x0012860F, False),
+        0x001019E9: ("BLENDED", 0x007DAC4D, False),
+    }
+    assert set(expected_hair_blood).issubset(hair_blood_materials)
+    for material_hash, (
+        alpha_mode,
+        diffuse_hash,
+        hair_mask,
+    ) in expected_hair_blood.items():
+        imported_material = hair_blood_materials[material_hash]
+        assert imported_material["mgs4_diffuse_alpha_enabled"]
+        assert imported_material["mgs4_diffuse_alpha_mode"] == alpha_mode
+        assert imported_material["mgs4_inferred_hair_mask"] == hair_mask
+        assert imported_material[
+            "mgs4_inferred_scripted_overlay"
+        ] == (not hair_mask)
+        assert imported_material.surface_render_method == (
+            "DITHERED" if hair_mask else "BLENDED"
+        )
+        assert imported_material.use_transparency_overlap == hair_mask
+        imported_principled = next(
+            node
+            for node in imported_material.node_tree.nodes
+            if node.bl_idname == "ShaderNodeBsdfPrincipled"
+        )
+        imported_alpha_link = imported_principled.inputs["Alpha"].links[0]
+        assert imported_alpha_link.from_node.get("mgs4_role") == "diffuse"
+        assert imported_alpha_link.from_socket.name == "Alpha"
+        assert (
+            imported_alpha_link.from_node.get("mgs4_texture_hash")
+            & 0xFFFFFFFF
+            == diffuse_hash
+        )
+    settings.import_animations = True
+
     alias_item = next(
         item
         for item in settings.results
@@ -96,6 +361,34 @@ with tempfile.TemporaryDirectory() as temporary:
     assert model_collection["mgs4_use_vertex_color"]
     assert not model_collection["mgs4_use_vertex_alpha"]
     assert model_collection["mgs4_highlight_missing_textures"]
+
+    character_armature = bpy.context.view_layer.objects.active
+    settings.search_text = "001a1f43.mdn"
+    choose_result("common/stage/stage02/s02a95l/cache/001a1f43.mdn")
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    high_flag_collection = next(
+        collection
+        for collection in bpy.data.collections
+        if collection.get("mgs4_virtual_path")
+        == "common/stage/stage02/s02a95l/cache/001a1f43.mdn"
+    )
+    high_flag_mesh = next(
+        obj for obj in high_flag_collection.all_objects if obj.type == "MESH"
+    )
+    assert high_flag_mesh["mgs4_flags"] == -0x80000000
+    assert high_flag_mesh["mgs4_flags"] & 0xFFFFFFFF == 0x80000000
+    high_flag_material = high_flag_mesh.data.materials[0]
+    high_flag_principled = next(
+        node
+        for node in high_flag_material.node_tree.nodes
+        if node.bl_idname == "ShaderNodeBsdfPrincipled"
+    )
+    assert high_flag_material.diffuse_color[3] == 1.0
+    assert high_flag_principled.inputs["Alpha"].default_value == 1.0
+    assert not high_flag_principled.inputs["Alpha"].is_linked
+    settings.search_text = ""
+    bpy.context.view_layer.objects.active = character_armature
+
     character_materials = {
         material
         for obj in model_collection.all_objects
@@ -138,7 +431,7 @@ with tempfile.TemporaryDirectory() as temporary:
     assert bpy.data.images
     principled_nodes = [
         node
-        for material in bpy.data.materials
+        for material in character_materials
         for node in material.node_tree.nodes
         if node.bl_idname == "ShaderNodeBsdfPrincipled"
     ]
@@ -157,7 +450,7 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     normal_nodes = [
         node
-        for material in bpy.data.materials
+        for material in character_materials
         for node in material.node_tree.nodes
         if node.bl_idname == "ShaderNodeNormalMap"
     ]
@@ -228,6 +521,109 @@ with tempfile.TemporaryDirectory() as temporary:
             finally:
                 evaluated.to_mesh_clear()
         assert -0.003 <= minimum_z <= 0.003
+
+    settings.search_text = "00aee46b.mdn"
+    settings.import_materials = False
+    settings.import_animations = True
+    settings.animation_limit = 3
+    existing_armatures = {
+        obj.as_pointer()
+        for obj in bpy.data.objects
+        if obj.type == "ARMATURE"
+    }
+    choose_result(
+        "common/stage/stage03/s03a00l/cache/00aee46b.mdn"
+    )
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    chapter_armature = next(
+        obj
+        for obj in bpy.data.objects
+        if obj.type == "ARMATURE"
+        and obj.as_pointer() not in existing_armatures
+    )
+    chapter_actions = {
+        candidate.name: candidate
+        for candidate in bpy.data.actions
+        if candidate.name.startswith("0084802F_")
+    }
+    assert set(chapter_actions) == {
+        "0084802F_0000_0048326B",
+        "0084802F_0001_0055905D",
+        "0084802F_0002_0070640B",
+    }
+    assert chapter_armature.animation_data is not None
+    assert (
+        chapter_armature.animation_data.action
+        == chapter_actions["0084802F_0000_0048326B"]
+    )
+    assert not any(
+        name.startswith("00815BAE_")
+        for name in chapter_actions
+    )
+    chapter_mesh = max(
+        (
+            obj
+            for obj in bpy.data.objects
+            if obj.type == "MESH" and obj.parent == chapter_armature
+        ),
+        key=lambda obj: len(obj.data.vertices),
+    )
+
+    def evaluated_vertices(mesh_object):
+        evaluated = mesh_object.evaluated_get(
+            bpy.context.evaluated_depsgraph_get()
+        )
+        evaluated_mesh = evaluated.to_mesh()
+        try:
+            return tuple(
+                tuple(vertex.co)
+                for vertex in evaluated_mesh.vertices
+            )
+        finally:
+            evaluated.to_mesh_clear()
+
+    bpy.context.scene.frame_set(1)
+    chapter_vertices_start = evaluated_vertices(chapter_mesh)
+    bpy.context.scene.frame_set(60)
+    chapter_vertices_middle = evaluated_vertices(chapter_mesh)
+    assert max(
+        abs(start_component - middle_component)
+        for start_vertex, middle_vertex in zip(
+            chapter_vertices_start,
+            chapter_vertices_middle,
+        )
+        for start_component, middle_component in zip(
+            start_vertex,
+            middle_vertex,
+        )
+    ) > 0.01
+
+    settings.search_text = ""
+    settings.import_materials = False
+    settings.import_animations = False
+    settings.import_inferred_lods = True
+    choose_result("common/stage/stage02/s02a40l/cache/0051d172.mdn")
+    assert bpy.ops.mgs4.import_selected() == {"FINISHED"}
+    lod_collections = {
+        collection.get("mgs4_virtual_path"): collection
+        for collection in bpy.data.collections
+        if collection.get("mgs4_inferred_lod_high_hash") == 0x0051D172
+    }
+    assert set(lod_collections) == lod_paths
+    for level, path in enumerate(
+        (
+            "common/stage/stage02/s02a40l/cache/0051d172.mdn",
+            "common/stage/stage02/s02a40l/cache/0051a3f7.mdn",
+            "common/stage/stage02/s02a40l/cache/0051b7f4.mdn",
+        )
+    ):
+        collection = lod_collections[path]
+        assert collection["mgs4_inferred_lod"]
+        assert collection["mgs4_inferred_lod_level"] == level
+        assert collection["mgs4_inferred_lod_count"] == 3
+        assert collection.hide_viewport == (level > 0)
+        assert collection.hide_render == (level > 0)
+    settings.import_inferred_lods = False
 
     settings.asset_kind = "MISSION"
     assert len(settings.results) > 5

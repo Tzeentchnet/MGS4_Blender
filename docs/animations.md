@@ -19,9 +19,13 @@ also be imported through Blender's File > Import menu.
 Direct installed-game Model imports enable automatic animation import by
 default. For a skinned MDN, candidates are limited to MTARs in the same
 virtual directory and must have a non-empty bone table that is a subset of the
-model skeleton. One archive is selected by preferring an exact skeleton, then
-the largest compatible bone table, then the greatest source clip count, and
-finally path order. Stage, mission, and loose MDN imports do not perform this
+model skeleton. If that directory has no compatible archive, the importer
+searches the remaining MTARs in the same region and stage chapter. Local-cache
+matches always retain priority. Within the selected scope, one archive is
+chosen by preferring an exact skeleton, then the largest compatible bone
+table, then the greatest source clip count, and finally path order. This
+restores chapter-shared animation libraries such as `0084802F.mtar` for
+`00AEE46B.mdn`. Stage, mission, and loose MDN imports do not perform this
 automatic search.
 
 For manual animation imports, an armature object must be selected. Tracks
@@ -123,6 +127,10 @@ After import:
 An Action with no matching curves is removed and counted as skipped.
 
 ## Action custom properties
+
+Unsigned 32-bit hashes and flags retain their source bit pattern in Blender's
+signed 32-bit integer representation. Use `value & 0xFFFFFFFF` when an
+unsigned value is required.
 
 | Property | Meaning |
 | --- | --- |

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import struct
 from typing import Final
+import warnings
 
 from ..errors import AssetNotFoundError, FormatError
 from .vpak import VpakArchive, VpakRecord
@@ -28,6 +30,8 @@ FOURCC = {
 }
 TXN_SLOT_SIZE: Final = 256
 TXN_SLOT_SIZE_OFFSET: Final = 0xFC
+SOURCE_INDEX_CACHE_VERSION: Final = 1
+SOURCE_INDEX_CACHE_NAME: Final = ".mgs4-texture-sources-v1.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,22 +274,174 @@ class TextureResolver:
             self._archives[path] = archive
         return archive
 
-    def _build_sources(self) -> dict[int, list[TextureSource]]:
-        sources: dict[int, list[TextureSource]] = {}
-        found_tree = False
-
+    def _texture_trees(
+        self,
+    ) -> tuple[tuple[str, tuple[Path, ...], Path], ...]:
+        trees = []
         for region in ("common", "ww"):
             base = self.game_root / region / "textures" / "PC_TXN_UP"
             data_archive_path = base / "paks" / "TextureData.pak"
-            index_paths = [
+            index_paths = tuple(
                 path
                 for path in (base / "txn_up.1.pak", base / "txn_up.2.pak")
                 if path.is_file()
-            ]
+            )
             if not index_paths or not data_archive_path.is_file():
                 continue
-            found_tree = True
+            trees.append((region, index_paths, data_archive_path))
 
+        if not trees:
+            raise AssetNotFoundError(
+                f"No PC_TXN_UP texture archives were found under {self.game_root}"
+            )
+        return tuple(trees)
+
+    def _source_index_fingerprint(
+        self,
+        trees: tuple[tuple[str, tuple[Path, ...], Path], ...],
+    ) -> list[list[str | int]]:
+        fingerprint = []
+        for _region, index_paths, data_archive_path in trees:
+            for path in (*index_paths, data_archive_path):
+                stat = path.stat()
+                fingerprint.append(
+                    [
+                        path.relative_to(self.game_root).as_posix(),
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                    ]
+                )
+        return fingerprint
+
+    def _load_source_index(
+        self,
+        trees: tuple[tuple[str, tuple[Path, ...], Path], ...],
+        fingerprint: list[list[str | int]],
+    ) -> dict[int, list[TextureSource]] | None:
+        cache_path = self.cache_root / SOURCE_INDEX_CACHE_NAME
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            warnings.warn(
+                f"Ignoring unreadable texture source cache {cache_path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+
+        if not isinstance(payload, dict):
+            warnings.warn(
+                f"Ignoring invalid texture source cache {cache_path}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+        if (
+            payload.get("version") != SOURCE_INDEX_CACHE_VERSION
+            or payload.get("game_root")
+            != os.path.normcase(str(self.game_root.resolve()))
+            or payload.get("fingerprint") != fingerprint
+        ):
+            return None
+
+        known_groups = {
+            (region, index_path.name): (index_path, data_archive_path)
+            for region, index_paths, data_archive_path in trees
+            for index_path in index_paths
+        }
+        sources: dict[int, list[TextureSource]] = {}
+        seen_groups = set()
+        source_count = 0
+        try:
+            groups = payload["groups"]
+            if not isinstance(groups, list):
+                raise ValueError("groups must be a list")
+            for group in groups:
+                if not isinstance(group, list) or len(group) != 3:
+                    raise ValueError("invalid archive group")
+                region, index_name, records = group
+                if not isinstance(region, str) or not isinstance(index_name, str):
+                    raise ValueError("invalid archive group name")
+                group_key = (region, index_name)
+                if group_key not in known_groups or group_key in seen_groups:
+                    raise ValueError("unknown or duplicate archive group")
+                if not isinstance(records, list):
+                    raise ValueError("archive records must be a list")
+                seen_groups.add(group_key)
+                index_archive_path, data_archive_path = known_groups[group_key]
+
+                for record in records:
+                    if not isinstance(record, list) or len(record) != 7:
+                        raise ValueError("invalid texture source record")
+                    (
+                        texture_hash,
+                        width,
+                        height,
+                        texture_format,
+                        mip_flags,
+                        declared_size,
+                        blob_path,
+                    ) = record
+                    integers = (
+                        texture_hash,
+                        width,
+                        height,
+                        texture_format,
+                        mip_flags,
+                        declared_size,
+                    )
+                    if not all(isinstance(value, int) for value in integers):
+                        raise ValueError("texture source values must be integers")
+                    if (
+                        not 0 <= texture_hash <= 0xFFFFFFFF
+                        or width <= 0
+                        or height <= 0
+                        or texture_format < 0
+                        or mip_flags < 0
+                        or declared_size < 0
+                        or not isinstance(blob_path, str)
+                        or not blob_path
+                    ):
+                        raise ValueError("invalid texture source values")
+                    source = TextureSource(
+                        texture_hash=texture_hash,
+                        width=width,
+                        height=height,
+                        format=texture_format,
+                        mip_flags=mip_flags,
+                        declared_size=declared_size,
+                        blob_path=blob_path,
+                        region=region,
+                        index_archive_path=index_archive_path,
+                        data_archive_path=data_archive_path,
+                    )
+                    sources.setdefault(texture_hash, []).append(source)
+                    source_count += 1
+
+            if seen_groups != set(known_groups):
+                raise ValueError("texture source archive groups are incomplete")
+            if (
+                payload.get("source_count") != source_count
+                or payload.get("hash_count") != len(sources)
+            ):
+                raise ValueError("texture source counts do not match")
+        except (KeyError, TypeError, ValueError) as exc:
+            warnings.warn(
+                f"Ignoring invalid texture source cache {cache_path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+        return sources
+
+    def _scan_sources(
+        self,
+        trees: tuple[tuple[str, tuple[Path, ...], Path], ...],
+    ) -> dict[int, list[TextureSource]]:
+        sources: dict[int, list[TextureSource]] = {}
+        for region, index_paths, data_archive_path in trees:
             for index_path in index_paths:
                 archive = self._archive(index_path)
                 for record in archive.iter_extension(".txn"):
@@ -297,11 +453,86 @@ class TextureResolver:
                         data_archive_path=data_archive_path,
                     ):
                         sources.setdefault(source.texture_hash, []).append(source)
+        return sources
 
-        if not found_tree:
-            raise AssetNotFoundError(
-                f"No PC_TXN_UP texture archives were found under {self.game_root}"
+    def _write_source_index(
+        self,
+        trees: tuple[tuple[str, tuple[Path, ...], Path], ...],
+        fingerprint: list[list[str | int]],
+        sources: dict[int, list[TextureSource]],
+    ) -> None:
+        grouped = {
+            (region, index_path.name): []
+            for region, index_paths, _data_archive_path in trees
+            for index_path in index_paths
+        }
+        source_count = 0
+        for matches in sources.values():
+            for source in matches:
+                grouped[(source.region, source.index_archive_path.name)].append(
+                    [
+                        source.texture_hash,
+                        source.width,
+                        source.height,
+                        source.format,
+                        source.mip_flags,
+                        source.declared_size,
+                        source.blob_path,
+                    ]
+                )
+                source_count += 1
+
+        payload = {
+            "version": SOURCE_INDEX_CACHE_VERSION,
+            "game_root": os.path.normcase(str(self.game_root.resolve())),
+            "fingerprint": fingerprint,
+            "source_count": source_count,
+            "hash_count": len(sources),
+            "groups": [
+                [region, index_name, records]
+                for (region, index_name), records in grouped.items()
+            ],
+        }
+        cache_path = self.cache_root / SOURCE_INDEX_CACHE_NAME
+        temporary = cache_path.with_name(f"{cache_path.name}.tmp-{os.getpid()}")
+        try:
+            self.cache_root.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
             )
+            temporary.replace(cache_path)
+        except OSError as exc:
+            warnings.warn(
+                f"Could not write texture source cache {cache_path}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as exc:
+                warnings.warn(
+                    f"Could not remove temporary texture source cache "
+                    f"{temporary}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    def _build_sources(self) -> dict[int, list[TextureSource]]:
+        trees = self._texture_trees()
+        fingerprint = self._source_index_fingerprint(trees)
+        sources = self._load_source_index(trees, fingerprint)
+        if sources is not None:
+            return sources
+
+        sources = self._scan_sources(trees)
+        self._write_source_index(trees, fingerprint, sources)
         return sources
 
     @property

@@ -10,15 +10,35 @@ from mathutils import Euler, Matrix, Vector
 import numpy as np
 
 from .errors import MGS4Error
-from .formats.common import hash_name
+from .formats.common import hash_name, uint32_to_int32
 from .formats.mdn import MdnMaterial, MdnModel
 from .formats.mtar import MotionArchive, QuaternionKey
-from .formats.texture import TextureResolver, TextureSource
+from .formats.texture import (
+    FORMAT_DXT3,
+    FORMAT_DXT5,
+    FORMAT_RGBA32,
+    TextureResolver,
+    TextureSource,
+)
 
 
 LAYER_MODE_CONSERVATIVE = "CONSERVATIVE"
 LAYER_MODE_PREVIEW = "LAYER_PREVIEW"
 LAYER_MODES = frozenset({LAYER_MODE_CONSERVATIVE, LAYER_MODE_PREVIEW})
+_ALPHA_CAPABLE_TEXTURE_FORMATS = frozenset(
+    {FORMAT_RGBA32, FORMAT_DXT3, FORMAT_DXT5}
+)
+_DIFFUSE_ALPHA_BLENDED = "BLENDED"
+_DIFFUSE_ALPHA_MASKED = "MASKED"
+_DETAIL_DECAL_SIGNATURES = frozenset(
+    {
+        (0x00120000, 2),
+        (0x00120002, 3),
+    }
+)
+_TREE_MASK_MIN_AXIS_RATIO = 0.4
+_TREE_MASK_MIN_TRIANGLES = 512
+_VARIANT_50_VEGETATION_MIN_AXIS_RATIO = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +72,8 @@ class MotionImportResult:
 class _MaterialTextureOutputs:
     base_color: bpy.types.NodeSocket | None = None
     opacity: bpy.types.NodeSocket | None = None
+    diffuse_alpha: bool = False
+    diffuse_alpha_mode: str | None = None
     missing_count: int = 0
 
 
@@ -59,6 +81,7 @@ class _MaterialTextureOutputs:
 class _MaterialVertexColorSupport:
     rgb: bool
     alpha: bool
+    alpha_fade: bool
 
 
 def _game_vector(
@@ -113,12 +136,11 @@ def _safe_diffuse_color(
         return 0.8, 0.8, 0.8, 1.0
     if max(abs(component) for component in value) < 1e-8:
         return 0.8, 0.8, 0.8, 1.0
-    alpha = value[3] if 0.0 <= value[3] <= 1.0 else 1.0
     return (
         max(0.0, min(1.0, value[0])),
         max(0.0, min(1.0, value[1])),
         max(0.0, min(1.0, value[2])),
-        alpha,
+        1.0,
     )
 
 
@@ -151,7 +173,25 @@ def _set_transparent(material: bpy.types.Material) -> None:
         material.blend_method = "BLEND"
 
 
+def _set_masked(material: bpy.types.Material) -> None:
+    if hasattr(material, "surface_render_method"):
+        material.surface_render_method = "DITHERED"
+        if hasattr(material, "use_transparency_overlap"):
+            material.use_transparency_overlap = True
+    elif hasattr(material, "blend_method"):
+        material.blend_method = "CLIP"
+        if hasattr(material, "alpha_threshold"):
+            material.alpha_threshold = 0.5
+
+
 def _texture_roles(material: MdnMaterial) -> tuple[str, ...]:
+    if _uses_variant_50_color_presentation(material):
+        return (
+            "secondary_color",
+            "normal",
+            "diffuse",
+            "specular_gradient",
+        )
     shader = material.flags & 0xFF
     no_specular = bool((material.flags >> 17) & 1)
     has_environment = bool((material.flags >> 20) & 1)
@@ -175,8 +215,6 @@ def _texture_roles(material: MdnMaterial) -> tuple[str, ...]:
             roles.append("normal")
         if has_environment:
             roles.append("environment")
-    elif shader == 0x00 and no_specular and has_environment:
-        roles.extend(("diffuse", "unknown"))
     else:
         roles.append("diffuse")
         if not no_normal:
@@ -230,7 +268,114 @@ def _texture_roles(material: MdnMaterial) -> tuple[str, ...]:
     return tuple(roles[: material.texture_count])
 
 
-_COLOR_TEXTURE_ROLES = frozenset({"diffuse", "layer", "environment"})
+def _uses_variant_50_color_presentation(material: MdnMaterial) -> bool:
+    return (
+        material.flags == 0x00000050
+        and material.texture_count == 4
+        and bool(material.parameters)
+        and all(
+            abs(component - expected) < 1e-6
+            for component, expected in zip(
+                material.parameters[0],
+                (3.0, 0.0, 0.0, 1.0),
+            )
+        )
+    )
+
+
+def _variant_a5_translucency(
+    material: MdnMaterial,
+) -> tuple[float, float] | None:
+    if (
+        material.flags != 0x000000A5
+        or material.texture_count != 2
+        or len(material.parameters) < 4
+    ):
+        return None
+    opacity = material.parameters[2][3]
+    roughness = material.parameters[3][3]
+    if (
+        not math.isfinite(opacity)
+        or not math.isfinite(roughness)
+        or not 0.0 < opacity < 1.0
+    ):
+        return None
+    return opacity, max(0.0, min(1.0, roughness))
+
+
+def _uses_diffuse_alpha(
+    material: MdnMaterial,
+    texture_source: TextureSource,
+    *,
+    detail_decal: bool = False,
+) -> bool:
+    return (
+        _diffuse_alpha_mode(
+            material,
+            texture_source,
+            detail_decal=detail_decal,
+        )
+        is not None
+    )
+
+
+def _diffuse_alpha_mode(
+    material: MdnMaterial,
+    texture_source: TextureSource,
+    *,
+    masked: bool = False,
+    suppress_generic: bool = False,
+    detail_decal: bool = False,
+    inferred_tree_mask: bool = False,
+    variant_50_vegetation: bool = False,
+    inferred_hair_mask: bool = False,
+    inferred_scripted_overlay: bool = False,
+) -> str | None:
+    if texture_source.format not in _ALPHA_CAPABLE_TEXTURE_FORMATS:
+        return None
+    shader = material.flags & 0xFF
+    no_specular = bool((material.flags >> 17) & 1)
+    has_environment = bool((material.flags >> 20) & 1)
+    if shader == 0x30 and material.texture_count == 1:
+        return _DIFFUSE_ALPHA_MASKED
+    if inferred_tree_mask or variant_50_vegetation or inferred_hair_mask:
+        return _DIFFUSE_ALPHA_MASKED
+    if inferred_scripted_overlay:
+        return _DIFFUSE_ALPHA_BLENDED
+    if material.flags == 0x00100010 and material.texture_count == 1:
+        return _DIFFUSE_ALPHA_BLENDED
+    if (
+        masked
+        and material.flags == 0x00110000
+        and material.texture_count == 4
+    ):
+        return _DIFFUSE_ALPHA_BLENDED
+    if (
+        detail_decal
+        and shader == 0x02
+        and no_specular
+        and has_environment
+        and material.texture_count == 3
+    ):
+        return _DIFFUSE_ALPHA_BLENDED
+    if (
+        shader == 0x00
+        and no_specular
+        and has_environment
+        and material.texture_count == 2
+        and not suppress_generic
+    ):
+        return (
+            _DIFFUSE_ALPHA_MASKED
+            if masked
+            else _DIFFUSE_ALPHA_BLENDED
+        )
+    return None
+
+
+_COLOR_TEXTURE_ROLES = frozenset(
+    {"diffuse", "layer", "environment", "secondary_color"}
+)
 
 
 def _texture_interpretation(role: str) -> str:
@@ -259,7 +404,7 @@ def _load_texture_image(
         image = bpy.data.images.load(str(image_path), check_existing=False)
         image.name = image_name
     _configure_image_color_space(image, role)
-    image["mgs4_texture_hash"] = texture_hash
+    image["mgs4_texture_hash"] = uint32_to_int32(texture_hash)
     image["mgs4_region"] = source.region
     image["mgs4_interpretation"] = interpretation
     return image
@@ -291,7 +436,7 @@ def _missing_texture_image(
         image.update()
     _configure_image_color_space(image, role)
     image["mgs4_missing_texture"] = True
-    image["mgs4_texture_hash"] = texture_hash
+    image["mgs4_texture_hash"] = uint32_to_int32(texture_hash)
     image["mgs4_interpretation"] = interpretation
     return image
 
@@ -323,7 +468,7 @@ def _new_texture_slot_frame(
         frame.color = (0.28, 0.16, 0.42)
     frame["mgs4_slot"] = slot
     frame["mgs4_role"] = role
-    frame["mgs4_texture_hash"] = texture_hash
+    frame["mgs4_texture_hash"] = uint32_to_int32(texture_hash)
     frame["mgs4_missing_texture"] = missing
     return frame
 
@@ -337,6 +482,13 @@ def _new_texture_nodes(
     specular_level: float,
     warnings: list[str],
     options: MaterialImportOptions,
+    masked_diffuse_alpha: bool,
+    suppressed_diffuse_alpha: bool,
+    inferred_detail_decal: bool,
+    inferred_tree_mask: bool,
+    inferred_variant_50_vegetation: bool,
+    inferred_hair_mask: bool,
+    inferred_scripted_overlay: bool,
 ) -> _MaterialTextureOutputs:
     nodes = material.node_tree.nodes
     links = material.node_tree.links
@@ -400,8 +552,8 @@ def _new_texture_nodes(
         image_node.image = image
         image_node.parent = slot_frame
         image_node.location = (400.0, 0.0)
-        image_node["mgs4_texture_hash"] = texture.name_hash
-        image_node["mgs4_texture_flags"] = texture.flags
+        image_node["mgs4_texture_hash"] = uint32_to_int32(texture.name_hash)
+        image_node["mgs4_texture_flags"] = uint32_to_int32(texture.flags)
         image_node["mgs4_role"] = role
         image_node["mgs4_interpretation"] = _texture_interpretation(role)
         image_node["mgs4_missing_texture"] = missing
@@ -423,6 +575,25 @@ def _new_texture_nodes(
         if role == "diffuse":
             if outputs.base_color is None:
                 outputs.base_color = image_node.outputs["Color"]
+            diffuse_alpha_mode = (
+                None
+                if missing
+                else _diffuse_alpha_mode(
+                    source_material,
+                    texture_source,
+                    masked=masked_diffuse_alpha,
+                    suppress_generic=suppressed_diffuse_alpha,
+                    detail_decal=inferred_detail_decal,
+                    inferred_tree_mask=inferred_tree_mask,
+                    variant_50_vegetation=inferred_variant_50_vegetation,
+                    inferred_hair_mask=inferred_hair_mask,
+                    inferred_scripted_overlay=inferred_scripted_overlay,
+                )
+            )
+            if outputs.opacity is None and diffuse_alpha_mode is not None:
+                outputs.opacity = image_node.outputs["Alpha"]
+                outputs.diffuse_alpha = True
+                outputs.diffuse_alpha_mode = diffuse_alpha_mode
         elif (
             role == "layer"
             and options.layer_mode == LAYER_MODE_PREVIEW
@@ -477,13 +648,13 @@ def _material_vertex_color_support(
         [] for _material in model.materials
     ]
     for geometry in model.meshes:
-        material_vertices: dict[int, set[int]] = {}
+        material_triangles: dict[int, list[tuple[int, int, int]]] = {}
         for triangle, material_index in zip(
             geometry.triangles,
             geometry.triangle_materials,
         ):
             if 0 <= material_index < len(usage):
-                material_vertices.setdefault(material_index, set()).update(
+                material_triangles.setdefault(material_index, []).append(
                     triangle
                 )
 
@@ -491,10 +662,15 @@ def _material_vertex_color_support(
             bool(geometry.colors)
             and len(geometry.colors) == len(geometry.vertices)
         )
-        for material_index, vertex_indices in material_vertices.items():
+        for material_index, triangles in material_triangles.items():
             if not has_vertex_colors:
-                support = _MaterialVertexColorSupport(False, False)
+                support = _MaterialVertexColorSupport(False, False, False)
             else:
+                vertex_indices = {
+                    vertex_index
+                    for triangle in triangles
+                    for vertex_index in triangle
+                }
                 colors = (
                     geometry.colors[vertex_index]
                     for vertex_index in vertex_indices
@@ -506,14 +682,215 @@ def _material_vertex_color_support(
                         for color in color_values
                     ),
                     alpha=any(abs(color[3]) > 1e-6 for color in color_values),
+                    alpha_fade=any(
+                        max(geometry.colors[index][3] for index in triangle)
+                        - min(geometry.colors[index][3] for index in triangle)
+                        > 1e-6
+                        for triangle in triangles
+                    ),
                 )
             usage[material_index].append(support)
     return tuple(
         _MaterialVertexColorSupport(
             rgb=bool(values) and all(value.rgb for value in values),
             alpha=bool(values) and all(value.alpha for value in values),
+            alpha_fade=bool(values) and any(
+                value.alpha_fade for value in values
+            ),
         )
         for values in usage
+    )
+
+
+def _material_render_families(
+    model: MdnModel,
+) -> tuple[frozenset[int], ...]:
+    usage: list[set[int]] = [set() for _material in model.materials]
+    for geometry in model.meshes:
+        render_family = geometry.info.flags >> 24
+        for material_index in set(geometry.triangle_materials):
+            if 0 <= material_index < len(usage):
+                usage[material_index].add(render_family)
+    return tuple(frozenset(values) for values in usage)
+
+
+def _material_alpha_render_states(
+    model: MdnModel,
+) -> tuple[bool, ...]:
+    states = [False] * len(model.materials)
+    for geometry in model.meshes:
+        if not geometry.info.flags & 0x00001000:
+            continue
+        for material_index in set(geometry.triangle_materials):
+            if 0 <= material_index < len(states):
+                states[material_index] = True
+    return tuple(states)
+
+
+def _material_masked_diffuse_alpha(
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        families == frozenset({0x10}) and alpha_render_state
+        for families, alpha_render_state in zip(
+            render_families,
+            alpha_render_states,
+        )
+    )
+
+
+def _material_suppressed_diffuse_alpha(
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        families == frozenset({0x10}) and not alpha_render_state
+        for families, alpha_render_state in zip(
+            render_families,
+            alpha_render_states,
+        )
+    )
+
+
+def _material_geometry_metrics(
+    model: MdnModel,
+    candidates: set[int],
+) -> Iterable[tuple[int, int, tuple[float, float, float]]]:
+    for geometry in model.meshes:
+        material_vertices: dict[int, set[int]] = {}
+        material_triangle_counts: dict[int, int] = {}
+        for triangle, material_index in zip(
+            geometry.triangles,
+            geometry.triangle_materials,
+        ):
+            if material_index not in candidates:
+                continue
+            material_vertices.setdefault(material_index, set()).update(
+                triangle
+            )
+            material_triangle_counts[material_index] = (
+                material_triangle_counts.get(material_index, 0) + 1
+            )
+        for material_index, vertex_indices in material_vertices.items():
+            spans = tuple(
+                max(geometry.vertices[index][axis] for index in vertex_indices)
+                - min(
+                    geometry.vertices[index][axis]
+                    for index in vertex_indices
+                )
+                for axis in range(3)
+            )
+            yield (
+                material_index,
+                material_triangle_counts[material_index],
+                spans,
+            )
+
+
+def _material_inferred_tree_masks(
+    model: MdnModel,
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    candidates = {
+        material_index
+        for material_index, material in enumerate(model.materials)
+        if material.flags == 0x00100010
+        and material.texture_count == 1
+        and render_families[material_index] == frozenset({0x00})
+        and alpha_render_states[material_index]
+    }
+    inferred = [False] * len(model.materials)
+    for material_index, triangle_count, spans in _material_geometry_metrics(
+        model,
+        candidates,
+    ):
+        largest_span = max(spans)
+        if (
+            triangle_count >= _TREE_MASK_MIN_TRIANGLES
+            and largest_span > 0.0
+            and min(spans) >= largest_span * _TREE_MASK_MIN_AXIS_RATIO
+        ):
+            inferred[material_index] = True
+    return tuple(inferred)
+
+
+def _material_inferred_variant_50_vegetation(
+    model: MdnModel,
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    candidates = {
+        material_index
+        for material_index, material in enumerate(model.materials)
+        if material.flags == 0x00100050
+        and material.texture_count == 3
+        and render_families[material_index] == frozenset({0x80})
+        and alpha_render_states[material_index]
+    }
+    inferred = [False] * len(model.materials)
+    for material_index, _triangle_count, spans in _material_geometry_metrics(
+        model,
+        candidates,
+    ):
+        largest_span = max(spans)
+        if (
+            largest_span > 0.0
+            and min(spans)
+            >= largest_span * _VARIANT_50_VEGETATION_MIN_AXIS_RATIO
+        ):
+            inferred[material_index] = True
+    return tuple(inferred)
+
+
+def _material_inferred_hair_masks(
+    model: MdnModel,
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        render_families[material_index] == frozenset({0x05})
+        and (
+            (
+                material.flags == 0x000000A3
+                and material.texture_count == 3
+            )
+            or (
+                material.flags == 0x00000003
+                and material.texture_count == 4
+                and alpha_render_states[material_index]
+            )
+        )
+        for material_index, material in enumerate(model.materials)
+    )
+
+
+def _material_inferred_scripted_overlays(
+    model: MdnModel,
+    render_families: tuple[frozenset[int], ...],
+    alpha_render_states: tuple[bool, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        material.flags == 0x00000060
+        and material.texture_count == 5
+        and render_families[material_index] == frozenset({0x05})
+        and alpha_render_states[material_index]
+        for material_index, material in enumerate(model.materials)
+    )
+
+
+def _material_inferred_detail_decals(
+    model: MdnModel,
+    render_families: tuple[frozenset[int], ...],
+    vertex_support: tuple[_MaterialVertexColorSupport, ...],
+) -> tuple[bool, ...]:
+    return tuple(
+        (material.flags, material.texture_count) in _DETAIL_DECAL_SIGNATURES
+        and render_families[material_index] == frozenset({0x15})
+        and vertex_support[material_index].alpha
+        and vertex_support[material_index].alpha_fade
+        for material_index, material in enumerate(model.materials)
     )
 
 
@@ -524,11 +901,14 @@ def _connect_material_presentation(
     texture_outputs: _MaterialTextureOutputs,
     options: MaterialImportOptions,
     vertex_support: _MaterialVertexColorSupport,
+    inferred_detail_decal: bool,
 ) -> None:
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     use_vertex_color = options.use_vertex_color and vertex_support.rgb
-    use_vertex_alpha = options.use_vertex_alpha and vertex_support.alpha
+    use_vertex_alpha = (
+        options.use_vertex_alpha or inferred_detail_decal
+    ) and vertex_support.alpha
     vertex_node = None
     presentation_frame = None
 
@@ -582,13 +962,21 @@ def _connect_material_presentation(
 
     if alpha_output is not None:
         links.new(alpha_output, principled.inputs["Alpha"])
-        _set_transparent(material)
+        if texture_outputs.diffuse_alpha_mode == _DIFFUSE_ALPHA_MASKED:
+            _set_masked(material)
+        else:
+            _set_transparent(material)
 
     material["mgs4_layer_mode"] = options.layer_mode
     material["mgs4_vertex_color_available"] = vertex_support.rgb
     material["mgs4_vertex_alpha_available"] = vertex_support.alpha
+    material["mgs4_inferred_detail_decal"] = inferred_detail_decal
     material["mgs4_vertex_color_enabled"] = use_vertex_color
     material["mgs4_vertex_alpha_enabled"] = use_vertex_alpha
+    material["mgs4_diffuse_alpha_enabled"] = texture_outputs.diffuse_alpha
+    material["mgs4_diffuse_alpha_mode"] = (
+        texture_outputs.diffuse_alpha_mode or "NONE"
+    )
     material["mgs4_missing_texture_count"] = texture_outputs.missing_count
 
 
@@ -601,13 +989,85 @@ def _build_materials(
 ) -> tuple[bpy.types.Material, ...]:
     materials = []
     vertex_color_support = _material_vertex_color_support(model)
+    render_families = _material_render_families(model)
+    alpha_render_states = _material_alpha_render_states(model)
+    masked_diffuse_alpha = _material_masked_diffuse_alpha(
+        render_families,
+        alpha_render_states,
+    )
+    suppressed_diffuse_alpha = _material_suppressed_diffuse_alpha(
+        render_families,
+        alpha_render_states,
+    )
+    inferred_tree_masks = _material_inferred_tree_masks(
+        model,
+        render_families,
+        alpha_render_states,
+    )
+    inferred_variant_50_vegetation = (
+        _material_inferred_variant_50_vegetation(
+            model,
+            render_families,
+            alpha_render_states,
+        )
+    )
+    inferred_hair_masks = _material_inferred_hair_masks(
+        model,
+        render_families,
+        alpha_render_states,
+    )
+    inferred_scripted_overlays = _material_inferred_scripted_overlays(
+        model,
+        render_families,
+        alpha_render_states,
+    )
+    inferred_detail_decals = _material_inferred_detail_decals(
+        model,
+        render_families,
+        vertex_color_support,
+    )
     for material_index, source in enumerate(model.materials):
+        variant_50_color_presentation = (
+            _uses_variant_50_color_presentation(source)
+        )
+        variant_a5_translucency = _variant_a5_translucency(source)
         name = f"MGS4_MAT_{source.name_hash:08X}"
         material = bpy.data.materials.new(name)
         material.use_nodes = True
-        material["mgs4_flags"] = source.flags
-        material["mgs4_name_hash"] = source.name_hash
+        material["mgs4_flags"] = uint32_to_int32(source.flags)
+        material["mgs4_name_hash"] = uint32_to_int32(source.name_hash)
         material["mgs4_texture_count"] = source.texture_count
+        material["mgs4_alpha_render_state"] = alpha_render_states[
+            material_index
+        ]
+        material["mgs4_diffuse_alpha_suppressed"] = (
+            suppressed_diffuse_alpha[material_index]
+        )
+        material["mgs4_inferred_tree_mask"] = inferred_tree_masks[
+            material_index
+        ]
+        material["mgs4_inferred_variant_50_vegetation"] = (
+            inferred_variant_50_vegetation[material_index]
+        )
+        material["mgs4_inferred_hair_mask"] = inferred_hair_masks[
+            material_index
+        ]
+        material["mgs4_inferred_scripted_overlay"] = (
+            inferred_scripted_overlays[material_index]
+        )
+        material["mgs4_variant_50_color_presentation"] = (
+            variant_50_color_presentation
+        )
+        material["mgs4_variant_a5_translucency"] = (
+            variant_a5_translucency is not None
+        )
+        if variant_a5_translucency is not None:
+            material["mgs4_variant_a5_opacity"] = (
+                variant_a5_translucency[0]
+            )
+            material["mgs4_variant_a5_roughness"] = (
+                variant_a5_translucency[1]
+            )
 
         nodes = material.node_tree.nodes
         nodes.clear()
@@ -619,8 +1079,16 @@ def _build_materials(
             principled.outputs["BSDF"], output.inputs["Surface"]
         )
 
-        diffuse = _safe_diffuse_color(source.parameters[0])
+        diffuse = (
+            (0.8, 0.8, 0.8, 1.0)
+            if variant_50_color_presentation
+            else _safe_diffuse_color(source.parameters[0])
+        )
+        if variant_a5_translucency is not None:
+            diffuse = (*diffuse[:3], variant_a5_translucency[0])
         specular_level, roughness = _legacy_specular(source.parameters[1])
+        if variant_a5_translucency is not None:
+            roughness = variant_a5_translucency[1]
         principled.inputs["Base Color"].default_value = diffuse
         principled.inputs["Alpha"].default_value = diffuse[3]
         principled.inputs["Metallic"].default_value = 0.0
@@ -644,7 +1112,25 @@ def _build_materials(
                 specular_level,
                 warnings,
                 options,
+                masked_diffuse_alpha[material_index],
+                suppressed_diffuse_alpha[material_index],
+                inferred_detail_decals[material_index],
+                inferred_tree_masks[material_index],
+                inferred_variant_50_vegetation[material_index],
+                inferred_hair_masks[material_index],
+                inferred_scripted_overlays[material_index],
             )
+        if variant_a5_translucency is not None:
+            opacity_node = nodes.new("ShaderNodeValue")
+            opacity_node.name = "MGS4_Variant_A5_Opacity"
+            opacity_node.label = "Variant A5 Parameter 2 W Opacity"
+            opacity_node.location = (-200.0, -500.0)
+            opacity_node["mgs4_role"] = "opacity"
+            opacity_node["mgs4_parameter"] = "parameter_2_w"
+            opacity_node.outputs["Value"].default_value = (
+                variant_a5_translucency[0]
+            )
+            texture_outputs.opacity = opacity_node.outputs["Value"]
         _connect_material_presentation(
             material,
             principled,
@@ -652,6 +1138,7 @@ def _build_materials(
             texture_outputs,
             options,
             vertex_color_support[material_index],
+            inferred_detail_decals[material_index],
         )
         materials.append(material)
     return tuple(materials)
@@ -677,7 +1164,9 @@ def _create_armature(
     armature_object = bpy.data.objects.new(f"{name}_Armature", armature_data)
     collection.objects.link(armature_object)
     armature_object.show_in_front = False
-    armature_object["mgs4_filename_hash"] = model.header.filename_hash
+    armature_object["mgs4_filename_hash"] = uint32_to_int32(
+        model.header.filename_hash
+    )
 
     bpy.context.view_layer.objects.active = armature_object
     armature_object.select_set(True)
@@ -716,8 +1205,8 @@ def _create_armature(
         bone = armature_data.bones[bone_name]
         source = model.bones[bone_index]
         bone["mgs4_bone_index"] = bone_index
-        bone["mgs4_name_hash"] = source.name_hash
-        bone["mgs4_flags"] = source.flags
+        bone["mgs4_name_hash"] = uint32_to_int32(source.name_hash)
+        bone["mgs4_flags"] = uint32_to_int32(source.flags)
     return armature_object, tuple(bone_names)
 
 
@@ -731,8 +1220,8 @@ def _create_group_collections(
     ]
     for group_index, (group, collection) in enumerate(zip(model.groups, groups)):
         collection["mgs4_group_index"] = group_index
-        collection["mgs4_name_hash"] = group.name_hash
-        collection["mgs4_flags"] = group.flags
+        collection["mgs4_name_hash"] = uint32_to_int32(group.name_hash)
+        collection["mgs4_flags"] = uint32_to_int32(group.flags)
         if 0 <= group.parent_index < len(groups) and group.parent_index != group_index:
             groups[group.parent_index].children.link(collection)
         else:
@@ -880,7 +1369,7 @@ def import_mdn_model(
     warnings: list[str] = []
     root = bpy.data.collections.new(name)
     (parent_collection or context.collection).children.link(root)
-    root["mgs4_filename_hash"] = model.header.filename_hash
+    root["mgs4_filename_hash"] = uint32_to_int32(model.header.filename_hash)
     root["mgs4_scale"] = scale
     root["mgs4_layer_mode"] = material_options.layer_mode
     root["mgs4_use_vertex_color"] = material_options.use_vertex_color
@@ -941,7 +1430,7 @@ def import_mdn_model(
         )
         target_collection.objects.link(mesh_object)
         mesh_object["mgs4_mesh_index"] = mesh_index
-        mesh_object["mgs4_flags"] = geometry.info.flags
+        mesh_object["mgs4_flags"] = uint32_to_int32(geometry.info.flags)
         mesh_object["mgs4_group_index"] = geometry.info.group_index
         mesh_object["mgs4_skin_index"] = geometry.info.skin_index
         mesh_object["mgs4_position"] = list(geometry.info.position)
@@ -1068,8 +1557,8 @@ def import_motion_archive(
         action.frame_end = frame_end
         action["mgs4_archive_name"] = Path(archive_name).stem if archive_name else ""
         action["mgs4_clip_index"] = clip.source_index
-        action["mgs4_name_hash"] = clip.name_hash
-        action["mgs4_flags"] = clip.flags
+        action["mgs4_name_hash"] = uint32_to_int32(clip.name_hash)
+        action["mgs4_flags"] = uint32_to_int32(clip.flags)
         action["mgs4_base_tick"] = clip.base_tick
         action["mgs4_frame_start"] = frame_start
         action["mgs4_frame_count"] = clip.frame_count

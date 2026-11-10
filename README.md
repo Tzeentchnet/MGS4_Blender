@@ -34,7 +34,9 @@ were added for the images.
 - Resolves material texture hashes through the PC `PC_TXN_UP` index and
   `TextureData.pak`.
 - Generates cached DDS/TGA files for DXT1, DXT3, DXT5, and ARGB32 textures,
-  loading compressed DDS data directly through Blender 5.2.
+  loading compressed DDS data directly through Blender 5.2. A persistent,
+  archive-validated source index avoids rescanning every TXN descriptor when
+  Blender starts.
 - Uses Blender's bulk mesh/attribute APIs with Blender's bundled NumPy for
   accelerated geometry, UV, color, tangent, and material assignment.
 - Builds Principled BSDF materials with diffuse, alpha, packed-normal, and
@@ -42,8 +44,10 @@ were added for the images.
   not route unused diffuse alpha into viewport dithering. Texture roles are
   grouped into labeled node frames, color and data interpretations use
   separate Blender Images, and optional checker images expose unresolved
-  texture references. Opacity/decal shaders use blended transparency with
-  overlap sorting disabled.
+  texture references. Opacity shaders and recognized diffuse-alpha decals use
+  blended transparency, terrain-detail overlays combine texture and vertex
+  alpha, and vegetation cards and dense tree-branch atlases use dithered masks
+  with overlapping transparent layers preserved.
 - Provides conservative or first-layer material presentation, vertex-color
   RGB multiplication, and separately opt-in vertex alpha.
 - Imports `MTAR`/`MTCM` skeletal clips as Blender 5.2 layered Actions at 60 FPS.
@@ -52,6 +56,9 @@ were added for the images.
   manifest instead of limiting map assembly to MDNs stored in the local cache.
 - Provides a searchable archive browser for models, motion archives, complete
   stage areas, and multi-area mission groups.
+- Hides structurally validated lower model LODs from the asset browser by
+  default and can import complete inferred LOD chains into separate
+  collections.
 - Resolves known asset hashes through Solideye's starter dictionary and supports
   searchable per-user names with JSON import and export.
 - Includes read-only pure-Python DAR and QAR parsers based on the layouts
@@ -71,8 +78,8 @@ E:\SteamLibrary\steamapps\common\METAL GEAR SOLID 4
 ```
 
 Change the path in the add-on preferences or the **MGS4** sidebar if needed.
-Decoded textures are written only to the configured Blender cache. The game
-installation is read-only.
+Decoded textures and the derived texture source index are written only to the
+configured Blender cache. The game installation is read-only.
 
 ## Use
 
@@ -105,6 +112,21 @@ exported JSON dictionary; enable **Overwrite Existing Names** in the file
 browser when imported entries should replace current custom names. **Export
 Names** writes only the user's custom entries, making additions easy to share.
 
+### Inferred model LODs
+
+The add-on preference **Hide Inferred LOD** is enabled by default. For Models,
+it removes validated lower-detail variants from the asset list while retaining
+every occurrence of the highest-detail model. Disable the preference to inspect
+or import individual lower variants.
+
+Direct Model imports expose **Import Inferred LOD**, which is disabled by
+default. Enabling it imports the complete validated chain from highest to
+lowest detail, even if a lower member was selected while the browser filter
+was disabled. Every model remains in its own root collection. The highest
+detail collection stays visible and active; lower collections are disabled in
+both the viewport and render. Stage Area, Mission, and loose MDN imports are
+unchanged.
+
 ### Material presentation
 
 Model, Stage Area, and Mission imports expose three presentation controls:
@@ -115,6 +137,30 @@ Model, Stage Area, and Mission imports expose three presentation controls:
 - **Layer Presentation > First Layer Preview** connects the first inferred
   layer texture to Base Color. It is a preview, not a reconstruction of the
   game's unknown layer-mask and blend semantics.
+- Exact four-texture variant-`0x50` materials with the verified
+  `(3, 0, 0, 1)` control parameter present slot 2 as Base Color and retain
+  slot 0 as an unconnected secondary-color node. This covers the handprint
+  and signature surfaces in `00B267E5` without showing the control parameter
+  as a red viewport material.
+- Generic two-texture diffuse alpha on render-family `0x10` additionally
+  requires mesh render-state bit `0x00001000`. Opaque architectural surfaces
+  that store auxiliary data in diffuse alpha therefore remain opaque, while
+  verified grass-card meshes retain their dithered masks.
+- Spatial render-family `0x80` card clusters using the verified three-texture
+  variant-`0x50` signature also receive dithered diffuse-alpha masks. Thin
+  planar effects with the same flags remain opaque.
+- Dense spatial render-family `0x00` tree geometry using the one-texture
+  `0x00100010` signature receives a dithered diffuse-alpha branch mask.
+  Lower-density grime, drip, and smear geometry with the same material flags
+  remains blended.
+- Character hair and fur use dithered diffuse-alpha masks for verified
+  family-`0x05` variant-`0xA3` materials and state-qualified variant-`0x03`
+  materials. State-qualified family-`0x05` variant-`0x60` materials use
+  blended diffuse alpha for scripted blood and damage overlays.
+- Two-texture variant-`0xA5` reflective materials use fractional material
+  parameter 2 W as blended opacity and parameter 3 W as roughness. This
+  restores translucent glasses, visors, and vehicle windows whose diffuse
+  textures intentionally contain no alpha mask.
 - **Vertex Color RGB** multiplies Base Color by the mesh's `Color` attribute
   when every mesh using that material has compatible, meaningful RGB data.
   All-zero legacy RGB channels are ignored so they cannot black out resolved
@@ -131,11 +177,12 @@ space.
 
 Installed-game Model imports enable **Import Animations** by default. For a
 skinned MDN, the importer searches MTARs in the same virtual cache directory
-and requires every motion bone to exist in the model skeleton. It imports one
-best match, preferring an exact skeleton, then the greatest bone coverage, and
-then the largest clip library. **Action Limit** controls how many Actions are
-created from that archive. Disable **Import Animations** to import only the
-model.
+and requires every motion bone to exist in the model skeleton. When that cache
+has no compatible archive, it falls back to MTARs elsewhere in the same stage
+chapter. It imports one best match, preferring an exact skeleton, then the
+greatest bone coverage, and then the largest clip library. **Action Limit**
+controls how many Actions are created from that archive. Disable **Import
+Animations** to import only the model.
 
 For animation results, select the matching imported armature first. MTAR names
 and model names are hashes; matching archives normally live in the same stage

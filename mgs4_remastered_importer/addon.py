@@ -43,9 +43,11 @@ from .catalog import (
     infer_exterior_stage_models,
 )
 from .errors import MGS4Error
+from .formats.common import uint32_to_int32
 from .formats.mdn import MdnModel, parse_mdn
 from .formats.mtar import parse_mtar
 from .formats.texture import TextureResolver
+from .inferred_lods import is_inferred_lod_lower
 
 
 DEFAULT_GAME_ROOT = (
@@ -93,6 +95,12 @@ def _asset_kind_updated(_settings, context) -> None:
         _refresh_asset_results(context)
 
 
+def _hide_inferred_lod_updated(_preferences, context) -> None:
+    scene = getattr(context, "scene", None)
+    if scene is not None and hasattr(scene, "mgs4_importer"):
+        _refresh_asset_results(context)
+
+
 def _search_text_updated(settings, _context) -> None:
     _select_first_matching_result(settings)
 
@@ -122,7 +130,10 @@ class MGS4ImporterPreferences(AddonPreferences):
     )
     cache_root: StringProperty(
         name="Texture Cache",
-        description="Writable folder for DDS and TGA files generated from PC_TXN_UP",
+        description=(
+            "Writable folder for generated DDS/TGA files and the PC_TXN_UP "
+            "source index"
+        ),
         subtype="DIR_PATH",
         default=DEFAULT_CACHE_ROOT,
     )
@@ -134,12 +145,21 @@ class MGS4ImporterPreferences(AddonPreferences):
         ),
         default=True,
     )
+    hide_inferred_lods: BoolProperty(
+        name="Hide Inferred LOD",
+        description=(
+            "Hide validated lower-detail LOD models from the Models asset list"
+        ),
+        default=True,
+        update=_hide_inferred_lod_updated,
+    )
 
     def draw(self, _context):
         layout = self.layout
         layout.prop(self, "game_root")
         layout.prop(self, "cache_root")
         layout.prop(self, "highlight_missing_textures")
+        layout.prop(self, "hide_inferred_lods")
         layout.label(text="The importer never writes into the game installation.")
 
 
@@ -178,6 +198,7 @@ class MGS4SceneSettings(PropertyGroup):
     catalog_root: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_kind: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_names_version: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    catalog_hide_inferred_lods: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
     catalog_error: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     scale: FloatProperty(
         name="Scale",
@@ -215,6 +236,14 @@ class MGS4SceneSettings(PropertyGroup):
     use_vertex_alpha: BoolProperty(
         name="Vertex Color Alpha",
         description="Use vertex alpha for material opacity when available",
+        default=False,
+    )
+    import_inferred_lods: BoolProperty(
+        name="Import Inferred LOD",
+        description=(
+            "Import the validated highest-detail model and its lower inferred "
+            "LOD models into hidden collections"
+        ),
         default=False,
     )
     import_animations: BoolProperty(
@@ -344,6 +373,15 @@ def _asset_name_hash(asset: AssetRecord) -> int | None:
     return asset_hash_from_path(asset.virtual_path)
 
 
+def _asset_is_inferred_lod_lower(asset: AssetRecord) -> bool:
+    name_hash = _asset_name_hash(asset)
+    return (
+        asset.kind == MODEL
+        and name_hash is not None
+        and is_inferred_lod_lower(name_hash)
+    )
+
+
 def _asset_resolved_name(
     asset: AssetRecord,
     names: AssetNameRegistry,
@@ -423,6 +461,8 @@ def _refresh_asset_results(
         and settings.catalog_root == preferences.game_root
         and settings.catalog_kind == settings.asset_kind
         and settings.catalog_names_version == BUNDLED_ASSET_NAMES_VERSION
+        and settings.catalog_hide_inferred_lods
+        == preferences.hide_inferred_lods
     ):
         return len(settings.results), settings.catalog_error
 
@@ -430,6 +470,7 @@ def _refresh_asset_results(
     settings.catalog_root = preferences.game_root
     settings.catalog_kind = settings.asset_kind
     settings.catalog_names_version = ""
+    settings.catalog_hide_inferred_lods = preferences.hide_inferred_lods
     settings.catalog_error = ""
     try:
         names = _asset_names(force=force)
@@ -437,6 +478,12 @@ def _refresh_asset_results(
             settings.asset_kind,
             limit=0,
         )
+        if settings.asset_kind == MODEL and preferences.hide_inferred_lods:
+            results = tuple(
+                asset
+                for asset in results
+                if not _asset_is_inferred_lod_lower(asset)
+            )
     except (OSError, MGS4Error) as exc:
         settings.catalog_error = str(exc)
         settings.result_index = 0
@@ -852,6 +899,45 @@ class MGS4_OT_import_selected(Operator):
             )
         return result
 
+    def _import_direct_model(
+        self,
+        context,
+        catalog: GameCatalog,
+        asset: AssetRecord,
+    ):
+        settings = context.scene.mgs4_importer
+        assets = (
+            catalog.inferred_lod_models(asset)
+            if settings.import_inferred_lods
+            else (asset,)
+        )
+        parsed = tuple(
+            (lod_asset, parse_mdn(catalog.read(lod_asset)))
+            for lod_asset in assets
+        )
+        imported = []
+        high_hash = asset_hash_from_path(assets[0].virtual_path)
+        for lod_level, (lod_asset, model) in enumerate(parsed):
+            result = self._import_model(
+                context,
+                catalog,
+                lod_asset,
+                model=model,
+            )
+            if len(parsed) > 1:
+                result.collection["mgs4_inferred_lod"] = True
+                result.collection["mgs4_inferred_lod_level"] = lod_level
+                result.collection["mgs4_inferred_lod_count"] = len(parsed)
+                if high_hash is not None:
+                    result.collection["mgs4_inferred_lod_high_hash"] = (
+                        uint32_to_int32(high_hash)
+                    )
+            if lod_level > 0:
+                result.collection.hide_viewport = True
+                result.collection.hide_render = True
+            imported.append(result)
+        return assets[0], parsed[0][1], imported[0], len(imported) - 1
+
     def _import_stage_contents(
         self,
         context,
@@ -1102,12 +1188,18 @@ class MGS4_OT_import_selected(Operator):
                         placement.rotation,
                         settings.scale,
                     )
-                    instance["mgs4_model_hash"] = name_hash
-                    instance["mgs4_command_hash"] = placement.command_hash
+                    instance["mgs4_model_hash"] = uint32_to_int32(name_hash)
+                    instance["mgs4_command_hash"] = uint32_to_int32(
+                        placement.command_hash
+                    )
                     if placement.effect_hash is not None:
-                        instance["mgs4_effect_hash"] = placement.effect_hash
+                        instance["mgs4_effect_hash"] = uint32_to_int32(
+                            placement.effect_hash
+                        )
                     if placement.property_hash is not None:
-                        instance["mgs4_property_hash"] = placement.property_hash
+                        instance["mgs4_property_hash"] = uint32_to_int32(
+                            placement.property_hash
+                        )
                     if (
                         placement.position is None
                         and placement.rotation is None
@@ -1248,19 +1340,25 @@ class MGS4_OT_import_selected(Operator):
         try:
             catalog = _catalog(context)
             if asset.kind == MODEL:
-                model = parse_mdn(catalog.read(asset))
-                result = self._import_model(
-                    context,
-                    catalog,
-                    asset,
-                    model=model,
+                primary_asset, model, result, lower_lod_count = (
+                    self._import_direct_model(
+                        context,
+                        catalog,
+                        asset,
+                    )
                 )
                 _activate_import(context, result.objects, result.armature)
                 report_level = {"INFO"}
                 message = (
                     f"Imported {len(result.objects)} objects from "
-                    f"{_asset_import_name(asset, _asset_names())}"
+                    f"{_asset_import_name(primary_asset, _asset_names())}"
                 )
+                if lower_lod_count:
+                    message += (
+                        f"; imported {lower_lod_count} lower inferred LOD"
+                        f"{'s' if lower_lod_count != 1 else ''} in hidden "
+                        "collections"
+                    )
                 if (
                     settings.import_animations
                     and result.armature is not None
@@ -1268,7 +1366,7 @@ class MGS4_OT_import_selected(Operator):
                 ):
                     try:
                         motion_asset = catalog.default_motion_for_model(
-                            asset,
+                            primary_asset,
                             tuple(bone.name_hash for bone in model.bones),
                         )
                         if motion_asset is None:
@@ -1430,6 +1528,8 @@ class MGS4_PT_importer(Panel):
             or settings.catalog_kind != settings.asset_kind
             or settings.catalog_names_version
             != BUNDLED_ASSET_NAMES_VERSION
+            or settings.catalog_hide_inferred_lods
+            != preferences.hide_inferred_lods
         ):
             _schedule_asset_refresh(context.scene)
 
@@ -1477,6 +1577,7 @@ class MGS4_PT_importer(Panel):
             options.prop(settings, "use_vertex_color")
             options.prop(settings, "use_vertex_alpha")
         if settings.asset_kind == MODEL:
+            options.prop(settings, "import_inferred_lods")
             options.prop(settings, "import_animations")
             if settings.import_animations:
                 options.prop(settings, "animation_limit")

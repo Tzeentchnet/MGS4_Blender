@@ -26,3 +26,9 @@ def strcode_from_name(name: str) -> int:
 
 def hash_name(value: int) -> str:
     return f"{value & 0xFFFFFFFF:08X}"
+
+
+def uint32_to_int32(value: int) -> int:
+    if not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError(f"Value {value} is outside the unsigned 32-bit range")
+    return value if value < 0x80000000 else value - 0x100000000

@@ -13,6 +13,7 @@ from .formats.geom import GeomEffects, parse_geom_effects
 from .formats.mdn import MdnModel
 from .formats.mtar import MotionArchive, parse_mtar
 from .formats.vpak import VpakArchive
+from .inferred_lods import inferred_lod_chain
 
 
 MODEL: Final = "MODEL"
@@ -257,6 +258,10 @@ class GameCatalog:
         self._models_by_path: dict[str, AssetRecord] = {}
         self._models_by_stage_suffix: dict[str, tuple[AssetRecord, ...]] = {}
         self._motions_by_directory: dict[str, tuple[AssetRecord, ...]] = {}
+        self._motions_by_chapter: dict[
+            tuple[str, str],
+            tuple[AssetRecord, ...],
+        ] = {}
         self._motion_metadata: dict[AssetRecord, MotionArchive] = {}
 
     def _archive(self, path: Path) -> VpakArchive:
@@ -443,16 +448,30 @@ class GameCatalog:
             for suffix, records in suffixes.items()
         }
         motion_directories: dict[str, list[AssetRecord]] = {}
+        motion_chapters: dict[tuple[str, str], list[AssetRecord]] = {}
         for asset in assets:
             if asset.kind != MOTION:
                 continue
             directory = asset.virtual_path.rsplit("/", 1)[0].lower()
             motion_directories.setdefault(directory, []).append(asset)
+            match = _STAGE_PATH.match(asset.virtual_path)
+            if match is not None:
+                chapter_key = (
+                    match.group("region").lower(),
+                    match.group("chapter").lower(),
+                )
+                motion_chapters.setdefault(chapter_key, []).append(asset)
         self._motions_by_directory = {
             directory: tuple(
                 sorted(records, key=lambda item: item.virtual_path)
             )
             for directory, records in motion_directories.items()
+        }
+        self._motions_by_chapter = {
+            chapter: tuple(
+                sorted(records, key=lambda item: item.virtual_path)
+            )
+            for chapter, records in motion_chapters.items()
         }
         return tuple(sorted(assets, key=lambda item: (item.kind, item.virtual_path)))
 
@@ -497,8 +516,32 @@ class GameCatalog:
             raise ValueError("Default motions can only be selected for models")
         _ = self.assets
         directory = model_asset.virtual_path.rsplit("/", 1)[0].lower()
+        local = self._select_motion(
+            self._motions_by_directory.get(directory, ()),
+            model_bone_hashes,
+        )
+        if local is not None:
+            return local
+
+        match = _STAGE_PATH.match(model_asset.virtual_path)
+        if match is None:
+            return None
+        chapter_key = (
+            match.group("region").lower(),
+            match.group("chapter").lower(),
+        )
+        return self._select_motion(
+            self._motions_by_chapter.get(chapter_key, ()),
+            model_bone_hashes,
+        )
+
+    def _select_motion(
+        self,
+        assets: Sequence[AssetRecord],
+        model_bone_hashes: Sequence[int],
+    ) -> AssetRecord | None:
         candidates = []
-        for asset in self._motions_by_directory.get(directory, ()):
+        for asset in assets:
             archive = self._motion_metadata.get(asset)
             if archive is None:
                 archive = parse_mtar(self.read(asset), clip_hashes=set())
@@ -633,6 +676,33 @@ class GameCatalog:
             None,
         )
         return loose or candidates[0]
+
+    def inferred_lod_models(
+        self,
+        model_asset: AssetRecord,
+    ) -> tuple[AssetRecord, ...]:
+        if model_asset.kind != MODEL:
+            raise ValueError("Inferred LODs can only be resolved for models")
+        model_hash = strcode_from_name(model_asset.virtual_path)
+        chain = inferred_lod_chain(model_hash)
+        if chain is None:
+            return (model_asset,)
+
+        preferred_directory = model_asset.virtual_path.rsplit("/", 1)[0]
+        models = []
+        for lod_hash in chain:
+            record = (
+                model_asset
+                if lod_hash == model_hash
+                else self.model_for_hash(lod_hash, preferred_directory)
+            )
+            if record is None:
+                raise AssetNotFoundError(
+                    f"Inferred LOD model {lod_hash:08X} was not found for "
+                    f"{model_asset.virtual_path}"
+                )
+            models.append(record)
+        return tuple(models)
 
     def stage_layout(self, prefix: str) -> StageLayout | None:
         resources = self.stage_resources(prefix)
